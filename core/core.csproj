@@ -44,6 +44,8 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="Connectors\ActiveDirectoryConnector.cs" />
+    <Compile Include="Connectors\PrintServerConnector.cs" />
     <Compile Include="Logging\ILoggingReceiver.cs" />
     <Compile Include="Logging\LoggerFacade.cs" />
     <Compile Include="Logging\LoggingDelegates.cs" />
@@ -55,7 +57,6 @@
   </ItemGroup>
   <ItemGroup>
     <Folder Include="Config\" />
-    <Folder Include="System\" />
   </ItemGroup>
   <ItemGroup>
     <Content Include="NLog.config">
