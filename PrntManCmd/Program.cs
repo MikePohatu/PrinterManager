@@ -4,12 +4,15 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
+using core.Logging;
+
 namespace PrntManCmd
 {
     class Program
     {
         static void Main(string[] args)
         {
+            LoggingFrameworkHelpers.InitializeLogFramework();
         }
     }
 }
