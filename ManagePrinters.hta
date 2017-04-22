@@ -1,0 +1,2628 @@
+<html>
+<!--'==========================================================================
+'
+' VBScript Source File -- Created with Notepad++
+'
+' NAME: 	ManagePrinters_v3.hta
+' AUTHOR: 	Mike Pohatu - CCDHB
+'
+' Change Log:
+'	01/05/2006		BJS		1.0.0	Initial Revision
+'	08/05/2006		BJS		1.0.1	Modified to handle empty uPrinters.ini file and blank sections 
+'	11/05/2006		BJS		1.0.2	Fixed bug with removing default printer when only 2 printers left in the list
+'	05/06/2008      WMS     1.0.3   Added default printer section back in.
+'   26/08/2008		OW		1.0.4	added logic to avoid name truncation of session printers
+'	28/08/2008		WMS		1.0.5	changed logic to delete local printers and to have the list of available printers for removal the same as those available for setting as default.
+'	30/05/2012		MP		2.0		changed layout, tidied up code, and changed functions for new app delivery design
+'	26/03/2013		MP		2.1		Updated for pilot. changed to local server search rather than ldap
+'	29/07/2013		MP		2.2		Added functionality for laptops and offline use.
+'	09/08/2013		MP		2.3		Fixed variable initialisation error
+'	12/08/2013		MP		2.4		Fixed objFSO error bug 
+'	27/01/2014		MP		2.5		Update H: drive definition to use AD path, rather than hard coded path
+' 	28/01/2014		MP		2.6		Added functionality for search options. 
+'	13/03/2014		MP		2.7		Added spooler test functionality
+'	23/05/2014		MP		3.0		Updated for v3.0 printer management toolset. 
+'	24/05/2014		MP		3.1		Added config file cleanup, UI tweaks, and minor bug fixes
+'	25/06/2014		MP		3.2		UI tweaks, and minor bug fixes
+'	07/07/2014		MP		3.2.1	Bug fixes to search options. 
+' 07/08/2014    SM    3.3   Removed all references to 3DHB folder in Netlogon share and reverted back to site specific folders
+'==========================================================================-->
+<head>
+<title>Printer Management</title>
+
+
+<style type="text/css">
+	body {
+		background-color:#F2F2F2;
+		overflow:hidden;
+	}
+	p {
+		font:bold 18px arial;
+	}
+	table { 
+		empty-cells: show; 
+		border-collapse: collapse;
+	}
+	td.outputWindow { 
+		empty-cells: show; 
+		text-align:left; 
+		font-size:10px; 
+		vertical-align:text-top; 
+		margin-left:5px; 
+		border-left-style:solid; 
+		border-width:1px; 
+		border-color:blue;
+		width: 100%;
+		height: 100%;	
+	}
+	div.ouputScrollable {
+		width: 100%;
+		height: 130px;
+		margin: 0;
+		padding: 0;
+		overflow: auto;	
+	}
+	
+	.progress {
+		position:absolute;
+		left:350px;
+		top:240px;
+		margin: 0;
+		padding: 0;
+	}
+	
+	div.progress_block {
+		width: 0px;
+		height: 0px;
+		margin: 0;
+		padding: 0;
+	}
+	
+	.advanced {
+		vertical-align:bottom;
+		font-size:10px;
+		empty-cells: show; 
+		text-align:left; 
+		vertical-align:text-top; 
+		margin-left:5px; 
+	}
+
+  </style>
+
+<HTA:APPLICATION 
+     ID="ManagePrinters" 
+     APPLICATIONNAME="Printer Management"
+     SINGLEINSTANCE="yes"
+	 SCROLL="no"
+>  
+
+<SCRIPT LANGUAGE="VBScript">
+	option explicit
+	Const EventSuccess = 0, EventError = 1, EventWarning = 2, EventInformation = 4, EventAuditSuccess = 8, EventAuditFailure = 16
+	Const ForReading = 1, ForWriting = 2, ForAppending = 8
+	Const sVersion = "v3.3"
+	
+	Dim bolDebug: bolDebug = false 
+	Dim bolEventLog: bolEventLog = False
+
+	Dim wshShell: Set wshShell = CreateObject("Wscript.Shell")
+	Dim wshNetwork: Set wshNetwork=CreateObject("Wscript.Network")
+	
+	Dim strENV: strENV = wshShell.ExpandEnvironmentStrings("%ENV%")
+	Dim strLogonServer: strLogonServer = wshShell.ExpandEnvironmentStrings("%LOGONSERVER%")
+	Dim strHomeShare: strHomeShare = wshShell.ExpandEnvironmentStrings("%HomeShare%")
+	Dim strHomePath: strHomePath = wshShell.ExpandEnvironmentStrings("%HomePath%")
+	Dim strDeviceType: strDeviceType = wshShell.ExpandEnvironmentStrings("%DeviceType%")
+	Dim strPCType: strPCType = wshShell.ExpandEnvironmentStrings("%PCType%")
+	Dim strUsername: strUsername = wshShell.ExpandEnvironmentStrings("%Username%")
+	Dim strCustomer: strCustomer = wshShell.ExpandEnvironmentStrings("%customer%")
+	Dim objFSO: Set objFSO = CreateObject("Scripting.FileSystemObject")
+
+	Dim intErr, intWarnCount
+	Dim cSite, cPrint, nPrint
+	Dim bolOffline: bolOffline = false
+	Dim bolAdvOptions: bolAdvOptions = False
+	Dim strHome, strFullName, strFileName, strSourceDir, strSleepVbs
+	Dim arrFN, arrQueuesRemoved
+	Dim intWinWidth: intWinWidth = 750
+	Dim intWinHeight: intWinHeight = 610
+	
+	strHome = strHomeShare & strHomePath
+	
+	'Find the path to the HTA itself
+	strFullName = replace(ManagePrinters.commandLine,chr(34),"")  
+	arrFN=split(strFullName,"\")  
+	strFileName = arrFN(ubound(arrFN))  
+	strSourceDir=replace(strFullName,arrFN(ubound(arrFN)),"") 
+	
+	strSleepVbs = """" & strSourceDir & "\sleep.vbs" & """"
+		
+	Dim strLogFile: strLogFile = strHome & "Windows\Print\ManagePrinters_v3.log"		'configure log file. 
+	Dim strDebugFile: strDebugFile = strHome & "Windows\Print\Debug.txt"	'create this file to enable logging. 
+	Dim strUserIni: strUserIni = strHome & "Windows\Print\UserPrinters.ini"
+	
+	Dim strGlobalsIni: strGlobalsIni = "\\ad\netlogon\" & strCustomer & "\" & strENV & "\_COMMON\Printers\Globals.ini"
+	Dim strMaintenanceIni: strMaintenanceIni = "\\ad\netlogon\" & strCustomer & "\" & strENV & "\_COMMON\Printers\PrinterMaintenance.ini"
+
+	Dim strCCIniUser: strCCIniUser = strHome & "Windows\uPrinters.ini"
+	Dim strCCIniCommon: strCCIniCommon = "\\ad\netlogon\CCDHB\" & strENV & "\_Common\Printers\cPrinters.ini"
+	Dim strHVIniUser: strHVIniUser = strHome & "Windows\uPrinters_HV.ini"
+	Dim strHVIniCommon: strHVIniCommon = "\\ad\netlogon\HVDHB\" & strENV & "\_Common\Printers\cPrinters.ini"
+	Dim strWRIniUser: strWRIniUser = strHome & "Windows\uPrinters_WR.ini"
+	Dim strWRIniCommon: strWRIniCommon = "\\ad\netlogon\WRDHB\" & strENV & "\_Common\Printers\cPrinters.ini"
+
+	Dim objPrintConfig: Set objPrintConfig = New PrintConfig
+	
+	
+	'*******************************************
+	'Functions and Subroutines
+	'*******************************************
+	
+	'Initialise the HTA on startup
+	Sub LoadHTA
+		if objFSO.FileExists(strDebugFile) then 
+			bolDebug = true
+		end if
+		
+		if bolDebug then Log EventInformation,VbCrLf & VbCrLf & "*******************" & VbCrLf & "ManagePrinters_v3.hta starting" & VbCrLf 
+		if bolDebug then Log EventInformation,"Sleep.vbs path: " & strSleepVbs
+		vShowProgress
+		
+		document.getElementById("Title").innerHTML = "Printer Management"
+		window.resizeTo intWinWidth,intWinHeight
+		document.getElementById("textOutput").innerHTML = "Loading. Please wait....."
+		RefreshWindow
+		
+		'Check for users H: drive. Error out if not there
+		If NOT objFSO.folderExists(strHome) Then
+			
+			msgbox "There is a problem with your user profile." & VBCrLf &_
+			"Please contact the service desk " & VBCrLf &_
+			"Error: " & strHome & " not found",48
+			
+			window.close
+		End if 
+	
+		'Check for the Windows folder. Create it if not there.	
+		If NOT objFSO.folderExists(strHome & "Windows") Then
+			objFSO.CreateFolder strHome & "Windows"
+		End if 
+
+		'Check for the Windows\Print folder. Create it if not there.	
+		If NOT objFSO.folderExists(strHome & "Windows\Print") Then
+			objFSO.CreateFolder strHome & "Windows\Print"
+		End if 
+		
+		'Check for network connectivity
+		if not objFSO.FileExists(strGlobalsIni) then
+			if uCase(strDeviceType) = "STDLT" then
+				msgBox "You are running in offline mode. Changes will" & VbCrLf & "not be saved to your roaming config",48,"Warning!"
+				bolOffline = true
+			else
+				msgbox "Network error - Cannot find network" & VbCrLf,48
+				window.close
+			end if
+		end if 
+		
+		
+		
+		'If in offline mode skip the imports. 
+		if not bolOffline then 
+			'Import the user ini files to the DB. 
+			if objFSO.FileExists(strUserIni) then 
+				objPrintConfig.ImportIni strUserIni
+				
+			Else
+				'Import the ini files. Last write wins for default
+				objPrintConfig.ImportLegacyIni strWRIniCommon,strWRIniUser
+				objPrintConfig.ImportLegacyIni strHVIniCommon,strHVIniUser
+				objPrintConfig.ImportLegacyIni strCCIniCommon,strCCIniUser
+			End if
+
+			'Import the global settings
+			objPrintConfig.ImportGlobals strGlobalsIni
+			document.getElementById("textOutput").innerHTML =  ""	'clear the output window
+			SyncPrintersConfig
+		else 
+			document.getElementById("textOutput").innerHTML =  ""	'clear the output window
+		end if 
+		
+		'Run maintenance. 
+		'arrQueuesRemoved  = objPrintConfig.RunMaintenance(strMaintenanceIni)
+
+		vShowSearchOptions
+		vRefreshDropDowns
+		vDisplayDefaultPrinter
+		vHideProgress
+		vHideAdvanced
+		
+		document.getElementById("txtSearch").focus
+		document.getElementById("versionNumber").innerHTML = sVersion 'update version number to display
+		
+		'Set the heading for offline if required. 
+		if bolOffline = true then
+			document.getElementById("Title").innerHTML = "Printer Management<font size=3> - Working offline</font>"
+		else
+			document.getElementById("Title").innerHTML = "Printer Management"
+		end if
+
+		
+		if bolDebug then vOutputText "Debugging enabled"
+	End Sub
+
+	'Unload the HTA. Save the updated Ini for the user.
+	Sub UnloadHTA
+		if bolDebug then Log EventInformation,"Function UnloadHTA started"
+		if not bolOffline then
+			objPrintConfig.ExportIni strUserIni
+			objPrintConfig.ExportLegacyIni strCCIniUser
+		end if
+		if bolDebug then Log EventInformation,"Function UnloadHTA finished"
+	End Sub
+	
+	
+	'Check the local print spooler to make sure it is OK. 
+	Function CheckSpooler
+		if bolDebug then Log EventInformation,"Function CheckSpooler started"
+		Dim objWMIService
+		Dim colListOfServices
+		Dim objService
+		
+		Set objWMIService = GetObject("winmgmts:\\.\root\cimv2")
+		Set colListOfServices = objWMIService.ExecQuery ("Select * from Win32_Service Where Name ='Spooler'")
+
+
+		For Each objService In colListOfServices
+			if not objService.State="Running" Then 
+				MsgBox "The print spooler on this machine is not running." & VbCrLf & "Please contact the service desk",0
+				CheckSpooler = false
+			Else
+				CheckSpooler = true
+			End If
+			
+		Next
+		if bolDebug then Log EventInformation,"Function CheckSpooler finished"
+	end Function
+	
+	'Search for a printer 
+	Sub searchPrinters
+		if bolDebug Then Log EventInformation,"Sub searchPrinters started"
+		'On Error Resume Next
+		
+		'Check that the spooler is OK
+		if CheckSpooler() = false then
+			exit sub
+		end if 
+		
+		'Put up the progress dialog
+		vShowProgress
+		
+		Dim bolFound, bolSpecServer
+		Dim colPrintServer			
+		Dim rootDSE				'as string
+		Dim distinguishedName 	'As String
+		Dim strPrinterName, strSearch, strPrinterPath, strPrintServer
+		Dim intCount
+		Dim objConnection, objCommand, objRecordSet, objOption, objPrintQueue
+		Dim bolEntireDir 	'Search for all printers in the directory, not a single server
+		Dim bolSearchDir	'Search the directory, not the server
+		Dim arrClustServers
+		
+		'set default settings. 
+		bolFound=false
+		bolSearchDir = true
+ 		bolEntireDir=false
+		
+		'Clear the search list
+		If listPrinters.options.length > 0 then
+			For intCount = 0 To listPrinters.options.length -1
+				'MsgBox "Item " & intCount
+				listPrinters.options.remove 0
+			Next
+		End If
+		
+		'get the values from the HTA
+		strSearch=txtSearch.Value
+		
+		if bolAdvOptions = true then
+			'First check if anything is ticked. If not, just do the default
+			If cbSpecificServer.checked OR cbSearchDir.checked OR cbSearchEntDir.Checked then
+				'If the specific server box is ticked, narrow the search
+				If cbSpecificServer.checked then
+					bolSpecServer = true
+					if bolDebug Then Log EventInformation,"Specific server option enabled"
+					strPrintServer = trim(txtServer.value)
+					if strPrintServer = "" then
+						vHideProgress
+						msgBox "Please specify a server to search"
+						exit sub
+					end if		
+				end if
+				
+				If cbSearchDir.checked then
+					if bolDebug Then Log EventInformation,"Directory server option enabled"
+					bolSearchDir = true
+				else
+					if bolDebug Then Log EventInformation,"Directory server option disabled"
+					bolSearchDir = false
+				end if
+				
+				if cbSearchEntDir.Checked then
+					if bolDebug Then Log EventInformation,"Entire directory option enabled"
+					bolEntireDir = true
+				end if 
+			end if
+		end if
+				
+		'Search LDAP for print queues
+		If bolSearchDir = true OR bolEntireDir = true then 
+			'if offline, display message to user
+			if bolOffline = true then
+				vHideProgress
+				document.getElementById("details").innerHTML =  "Directory search not available in offline mode"
+				exit sub
+			else 
+				document.getElementById("details").innerHTML = "Searching. Please wait..."
+			end if
+			
+			Dim aSearchServers
+			Dim sSearchServers
+			Dim sSvrSearch 
+			
+			Const ADS_SCOPE_SUBTREE = 2
+			
+			Set objConnection = CreateObject("ADODB.Connection")
+			Set objCommand =   CreateObject("ADODB.Command")
+			objConnection.Provider = "ADsDSOObject"
+			objConnection.Open "Active Directory Provider"
+			Set objCommand.ActiveConnection = objConnection
+			
+			objCommand.Properties("Page Size") = 1000
+			objCommand.Properties("Searchscope") = 2 
+			objCommand.Properties("Sort On") = "printerName"
+
+			Set rootDSE = GetObject("LDAP://rootDSE")
+			distinguishedName = "LDAP://" & rootDSE.Get("defaultNamingContext")
+
+			'Edit the search to put * around the printer name. If nothing entered, search for *
+			if not strSearch = "" Then
+				strSearch = "*" & strSearch & "*"
+			else	
+				strSearch = "*"
+			End if 
+			
+			'objCommand.CommandText = "SELECT cn, printerName, location FROM '" & distinguishedName & "' WHERE objectCategory='printQueue' AND serverName='" & cPrint & "*' AND printerName='*" & strSearch & "*'"
+			'Opened query to return any listed printer if bolEntireDir is set true.
+			
+			
+			if bolEntireDir then 
+				sSvrSearch = ""
+			elseif bolSpecServer = true then
+				sSvrSearch = " AND (serverName='" & strPrintServer & "*')"
+			else
+				'Get the CCDHB servers if option selected
+				if cbCCDHB.checked = true then
+					sSearchServers = objPrintConfig.GetSetting("CCDHB_Servers")
+					if bolDebug Then Log EventInformation,"Searchable CCDHB_Servers: " & sSearchServers
+					
+					if not sSearchServers = false then
+						aSearchServers = Split(sSearchServers,",")
+
+						'Apply the list of servers to the search string
+						for intCount=0 to uBound(aSearchServers)
+							if IsEmpty(sSvrSearch) then 
+								if bolDebug Then Log EventInformation,"Adding first server to search: " & aSearchServers(intCount)
+								sSvrSearch = " AND (serverName='" & aSearchServers(intCount) & "*'"
+							else
+								if bolDebug Then Log EventInformation,"Adding server to search: " & aSearchServers(intCount)
+								sSvrSearch = sSvrSearch & " OR serverName='" & aSearchServers(intCount) & "*'"
+							end if
+						next
+					end if
+				end if 
+				
+				'Get the HVDHB servers if option selected
+				if cbHVDHB.checked = true then
+					sSearchServers = objPrintConfig.GetSetting("HVDHB_Servers")
+					if bolDebug Then Log EventInformation,"Searchable HVDHB_Servers: " & sSearchServers
+					
+					if not sSearchServers = false then
+						aSearchServers = Split(sSearchServers,",")
+
+						'Apply the list of servers to the search string
+						for intCount=0 to uBound(aSearchServers)
+							if IsEmpty(sSvrSearch) then 
+								if bolDebug Then Log EventInformation,"Adding first server to search: " & aSearchServers(intCount)
+								sSvrSearch = " AND (serverName='" & aSearchServers(intCount) & "*'"
+							else
+								if bolDebug Then Log EventInformation,"Adding server to search: " & aSearchServers(intCount)
+								sSvrSearch = sSvrSearch & " OR serverName='" & aSearchServers(intCount) & "*'"
+							end if
+						next
+					end if
+				end if 
+				
+				'Get the WRDHB servers if option selected
+				if cbWRDHB.checked = true then
+					sSearchServers = objPrintConfig.GetSetting("WRDHB_Servers")
+					if bolDebug Then Log EventInformation,"Searchable WRDHB_Servers: " & sSearchServers
+					
+					if not sSearchServers = false then
+						aSearchServers = Split(sSearchServers,",")
+
+						'Apply the list of servers to the search string
+						for intCount=0 to uBound(aSearchServers)
+							if IsEmpty(sSvrSearch) then 
+								if bolDebug Then Log EventInformation,"Adding first server to search: " & aSearchServers(intCount)
+								sSvrSearch = " AND (serverName='" & aSearchServers(intCount) & "*'"
+							else
+								if bolDebug Then Log EventInformation,"Adding server to search: " & aSearchServers(intCount)
+								sSvrSearch = sSvrSearch & " OR serverName='" & aSearchServers(intCount) & "*'"
+							end if
+						next
+					end if
+				end if 
+				
+				'close up the search string
+				sSvrSearch = sSvrSearch & ")"
+			end if	
+			objCommand.CommandText = "SELECT cn, printerName, location, shortServerName FROM '" & distinguishedName & "' WHERE objectCategory='printQueue' " & sSvrSearch & " AND printerName='" & strSearch & "' ORDER BY printerName"
+			if bolDebug Then Log EventInformation,"Search: " & objCommand.CommandText
+
+			Set objRecordSet = objCommand.Execute
+			
+			if bolDebug Then Log EventInformation,"Search Complete"
+			
+			If Not objRecordSet.BOF And not objRecordset.EOF then
+				objRecordSet.MoveFirst
+				Do Until objRecordSet.EOF
+					'msgbox objRecordSet.Fields("Name").Value
+					set objOption = document.createElement("OPTION")
+					listPrinters.options.add objOption
+					
+					strPrinterName = objRecordSet.Fields("printerName").Value
+					strPrinterPath = "\\" & objRecordSet.Fields("shortServerName").Value & "\" & objRecordSet.Fields("printerName").Value
+					'strPrinterPath = "\\" & objRecordSet.Fields("shortServerName").Value
+					
+					objOption.innerText = strPrinterName
+					objOption.value = strPrinterPath
+					
+					'listPrinters.Add objRecordSet.Fields("Name").Value
+					objRecordSet.MoveNext
+				Loop
+				
+				document.getElementById("listPrinters").focus
+				bolFound=true
+			Else
+				'Nothing found
+				bolFound=false
+				 
+			End if
+	
+		
+		'Search for network printers on a print server. The query runs against the actual print server
+		else 
+			'Tell the user what is going on
+			document.getElementById("details").innerHTML = "Searching. Please wait..."
+			RefreshWindow
+			'Enumerate the print server. Get shared printers
+			on error resume next
+			Set colPrintServer = GetObject("WinNT://" & strPrintServer & ",Computer")
+			intErr = err.number
+			on error goto 0
+			
+			'If there was an error, tell the user and exit the search
+			if intErr <> 0 then 
+				'There was an error. Tell the user
+				vHideProgress
+				document.getElementById("details").innerHTML = "There was an error connecting to " & strPrintServer
+				exit Sub
+			end if 
+			
+			colPrintServer.Filter = Array("PrintQueue")
+			
+			'Loop through all printers on the print server and add matches to the list
+			For Each objPrintQueue In colPrintServer
+					if instr(1,uCase(objPrintQueue.Name),uCase(strSearch)) then
+						bolFound = true
+						set objOption = document.createElement("OPTION")
+					listPrinters.options.add objOption
+					
+					strPrinterName = objPrintQueue.Name
+					objOption.innerText = strPrinterName
+					
+					objOption.value = objPrintQueue.PrinterPath
+				End if
+			Next
+		
+			'Clear the user message
+			document.getElementById("details").innerHTML = ""
+			
+			document.getElementById("listPrinters").focus
+			
+
+		End if
+		
+		'if no results have been found, display message to user
+		if not bolFound Then 
+			vHideProgress
+			if strSearch = "*" then 
+				MsgBox "No shared printers found"
+			else 
+				MsgBox "Sorry, there are no printers containing " & """" & strSearch & """" 
+			end if  
+			
+		End if
+		
+		vHideProgress
+		document.getElementById("details").innerHTML = ""
+	End Sub
+
+	'Launch the normal add printer wizard 
+	'Enumerate print queues before and after to note any new queues
+	Sub RunWizard
+		if bolDebug then Log EventInformation,"Function RunWizard started"
+		Dim oPrtOld, oPrtNew, oExec
+		Dim bFound
+		Dim iNew, iOld
+		Dim sNewQueue, sOldQueue
+				
+		vOutputText "Starting add printer wizard. Please wait...."
+		
+		vShowProgress
+		
+		Set oPrtOld = wshNetwork.EnumPrinterConnections
+
+		vShowProgress
+		
+		wshShell.Run "rundll32 printui.dll,PrintUIEntry /il",0,true
+
+		vHideProgress
+		
+		if not bolOffline then
+			vOutputText "Synchronising configuration."
+			
+			Set oPrtNew = wshNetwork.EnumPrinterConnections
+			if oPrtNew.count > 0 and oPrtOld.count > 0 then
+				For iNew=1 to oPrtNew.Count -1 step 2
+					sNewQueue = oPrtNew(iNew)
+					
+					For iOld=1 to oPrtOld.Count -1 step 2
+						sOldQueue = oPrtOld(iOld)
+						
+						if uCase(sOldQueue) = uCase(sNewQueue) then
+							bFound = true
+							exit for
+						end if
+					Next
+					
+					if bFound <> true then 
+						objPrintConfig.AddQueue sNewQueue
+						vOutputText " Added " & sNewQueue
+						
+					end if
+					
+					'Reset for the next loop
+					bFound = false
+				next
+			End if
+		End if
+		vOutputText "Finished"
+	
+		vRefreshDropDowns
+		vDisplayDefaultPrinter
+		if bolDebug then Log EventInformation,"Function RunWizard finished"
+	end sub
+	
+	'Update the printer config with mapped printers
+	Sub SyncPrintersConfig
+		if bolDebug then Log EventInformation,"Function SyncPrintersConfig start"
+		Dim oMappedPrinters
+		Dim oOption
+		Dim iCount, iResponse
+		Dim bStaleFound: bStaleFound = false 	'records if a stale queue is found in the config
+		Dim bNewFound: bNewFound = false 	'records if a new queue is found in the mapped queues list
+		Dim sMappedQueue, sConfQueue, sQueue, sMsg
+		Dim dicMappedQueues: set dicMappedQueues = CreateObject("Scripting.Dictionary")
+		Dim dicStaleQueues: set dicStaleQueues = CreateObject("Scripting.Dictionary")
+		Dim dicNewQueues: set dicNewQueues = CreateObject("Scripting.Dictionary")
+		
+		Set oMappedPrinters = wshNetwork.EnumPrinterConnections
+		
+		'Add all mapped printers to the dictionary (ignore session printers)
+		For iCount = 0 To oMappedPrinters.Count -1 Step 2
+			sMappedQueue = uCase(oMappedPrinters(iCount+1))
+			if Left(sMappedQueue,2) = "\\" AND Left(uCase(sMappedQueue),8) <> "\\CLIENT" then
+				if bolDebug then Log EventInformation,"Adding " & sMappedQueue & " to the dictionary"
+				dicMappedQueues.Add sMappedQueue,sMappedQueue
+			end if
+		Next
+		
+		'First check for printers to be cleaned up i.e. they are in the config, but not mapped. 
+		For each sConfQueue in objPrintConfig.GetAllQueues()
+			if not dicMappedQueues.Exists(sConfQueue) then
+				bStaleFound = true
+				if bolDebug then Log EventWarning,"Stale queue found: " & sConfQueue
+				dicStaleQueues.Add sConfQueue,sConfQueue
+			end if
+		next
+		
+		'Now check for printers to be added i.e. they are mapped, but not in the config. 
+		For each sMappedQueue in dicMappedQueues.Keys()
+			if not objPrintConfig.QueryQueue(sMappedQueue) = true then	
+				bNewFound = true
+				if bolDebug then Log EventWarning,"New queue found: " & sMappedQueue
+				dicNewQueues.Add sMappedQueue,sMappedQueue
+			end if
+		Next
+		
+		if bStaleFound then
+			'Create the list of printers for the user to review
+			for each sQueue in dicStaleQueues.Keys()
+				sMsg = sMsg & VbCrLf & "  " & sQueue
+			next
+			
+			iResponse = msgBox(	"There are printers in your config that" & VbCrLf &_
+								"aren't connected. Do you wish to remove" & VbCrLf &_
+								"these printers from your roaming config?" & VbCrLf & sMsg,52,"Stale printers found")
+			if iResponse = 6 then 
+				if bolDebug then Log EventInformation,"Running stale cleanup task"
+				for each sQueue in dicStaleQueues.Keys()
+					if bolDebug then Log EventInformation,"Removing queue: " & sQueue
+					objPrintConfig.RemoveQueue sQueue
+					vOutputText "Removed queue from config: " & sQueue
+				next
+			end if
+		end if
+		
+		'Reset sMsg
+		sMsg = ""
+				
+		if bNewFound then
+			'Create the list of printers for the user to review
+			for each sQueue in dicNewQueues.Keys()
+				sMsg = sMsg & VbCrLf & "  " & sQueue
+			next
+			
+			iResponse = msgBox(	"There are connected printers that aren't" & VbCrLf &_
+								"in your config. Do you wish to add" & VbCrLf &_
+								"these printers to your roaming config?" & VbCrLf & sMsg,52,"New printers found")
+			if iResponse = 6 then 
+				if bolDebug then Log EventInformation,"Running new queues task"
+				for each sQueue in dicNewQueues.Keys()
+					if bolDebug then Log EventInformation,"Adding queue: " & sQueue
+					objPrintConfig.AddQueue sQueue
+					vOutputText "Added queue to config: " & sQueue
+				next
+			end if
+		end if
+		if bolDebug then Log EventInformation,"Function SyncPrintersConfig finished"
+	End Sub 	
+	
+	'Refresh the hta window. This is a workaround for an issue with hta where 
+	'updates to innerhtml don't display
+	Sub RefreshWindow
+		if bolDebug then Log EventInformation,"Function RefreshWindow started"
+		wshShell.Run "%comspec% /c",0,true
+		if bolDebug then Log EventInformation,"Function RefreshWindow finished"
+	End Sub
+	
+	'Display the printer properties dialog box
+	Sub PrinterProperties
+		if bolDebug then Log EventInformation,"Function PrinterProperties started"
+		'Check that the spooler is OK
+		if CheckSpooler() = false then
+			exit sub
+		end if
+
+		Dim printerPath, intCount
+		Dim strComputer
+		Dim colInstalledPrinters
+		Dim objPrinter
+
+		Dim oPrinters: Set oPrinters = wshNetwork.EnumPrinterConnections
+		
+		'Find the selected printer from the list of enumerated printers
+		For intCount = 0 To oPrinters.Count -1 Step 2
+			If instr(ucase(oPrinters(intCount+1)), ucase(selYourPrinters.Value)) then
+				printerPath = oPrinters(intCount+1)
+			End If
+		Next
+		
+		strComputer = "."
+
+		Dim objWMIService: Set objWMIService = GetObject("winmgmts:\\" & strComputer & "\root\cimv2")
+
+		Set colInstalledPrinters =  objWMIService.ExecQuery _
+			("Select * from Win32_Printer")
+
+		For Each objPrinter in colInstalledPrinters
+			 if UCase(printerPath) = ucase(objPrinter.Name) Then
+				Call wshShell.Run("rundll32 printui.dll,PrintUIEntry /p /n " & """" & objPrinter.Name & """")
+			 End If
+		Next
+		if bolDebug then Log EventInformation,"Function PrinterProperties finished"
+	End Sub
+
+	'Display the print queue dialog box
+	Sub PrintQueue
+		if bolDebug then Log EventInformation,"Function PrintQueue started"
+		'Check that the spooler is OK
+		if CheckSpooler() = false then
+			exit sub
+		end if
+
+		Dim printerPath, intCount
+		Dim strComputer
+		Dim colInstalledPrinters
+		Dim objPrinter
+
+		Dim oPrinters: Set oPrinters = wshNetwork.EnumPrinterConnections
+		
+		
+		For intCount = 0 To oPrinters.Count -1 Step 2
+			If instr(ucase(oPrinters(intCount+1)), ucase(selYourPrinters.Value)) then
+				printerPath = oPrinters(intCount+1)
+			End If
+		Next
+		
+		strComputer = "."
+
+		Dim objWMIService: Set objWMIService = GetObject("winmgmts:\\" & strComputer & "\root\cimv2")
+
+		Set colInstalledPrinters =  objWMIService.ExecQuery _
+			("Select * from Win32_Printer")
+
+		For Each objPrinter in colInstalledPrinters
+			 if UCase(printerPath) = ucase(objPrinter.Name) Then
+				Call wshShell.Run("rundll32 printui.dll,PrintUIEntry /o /n " & """" & objPrinter.Name & """")
+			 End If
+		Next
+		if bolDebug then Log EventInformation,"Function PrintQueue finished"
+	End Sub
+
+	
+
+	'Set the default
+	Function SetDefaultPrinter()
+		vShowProgress
+		dim intCount, intErr
+		Dim sPrinter
+		
+		sPrinter = selYourPrinters.Value
+		
+		if bolDebug = true Then Log EventInformation,"SetDefaultPrinter function started: " & sPrinter
+
+		If instr(sPrinter, "session") Then
+			if bolEventLog = true Then Log EventWarning,"Skipping session printer as default: " & sPrinter
+			'must be an autocreated local/network printer set as Default
+				'so don't try and connect it as default
+		Else
+			if bolDebug = true Then Log EventInformation,"Setting default printer: " & sPrinter
+			
+			on error resume next	'Required if the set fails.
+			if bolDebug then Log EventInformation,"Running the default printer code"
+			wshNetwork.SetDefaultPrinter sPrinter 'we are deliberately not touching local printers
+			intErr = err.number
+			intErr = err.number
+			
+			if bolDebug then Log EventInformation,"Finished running the default printer code"
+			on error goto 0			
+			
+			'Error checking and logging
+			if intErr <> 0 then
+				if bolDebug then Log EventError,"Failed to set default printer: " & sPrinter
+				vOutputText "Error! Failed to set " & sPrinter & " your default printer."
+				SetDefaultPrinter = false
+			else
+				if bolDebug then Log EventInformation,"Set default printer: " & sPrinter
+				vOutputText "Printer " & sPrinter & " successfully set as your default printer."
+				objPrintConfig.SetDefault(sPrinter)
+				SetDefaultPrinter = true
+			end if
+		End If
+
+		vDisplayDefaultPrinter
+		vHideProgress
+		if bolDebug then Log EventInformation,"Function SetDefaultPrinter finished"
+	End Function
+
+
+	'Map the printer
+	Function MapPrinter()
+		Dim iErr
+		Dim sPrinter
+		
+		sPrinter = listPrinters.Value
+		if bolDebug Then Log EventInformation,"Function MapPrinter started: " & sPrinter
+		
+		'Check that the spooler is OK
+		if CheckSpooler() = false then
+			exit Function
+		end if 
+		
+		vShowProgress
+		
+		on error resume next
+		WshNetwork.AddWindowsPrinterConnection sPrinter 
+		'wshShell.Run "rundll32 printui.dll,PrintUIEntry /in /q /n " & sPrinter,0,true
+		iErr = err.number
+		on error goto 0
+		
+		vHideProgress
+		
+		'Error checking and logging
+		if iErr <> 0 then
+			if bolDebug then Log EventError,"Failed to map printer: " & sPrinter
+			MapPrinter = false
+			vOutputText "Error! Failed to map printer: " & sPrinter
+		else
+			'OK. Now add the printer from the user config so we can update the ini
+			
+			if bolDebug then Log EventInformation,"Finished mapping printer: " & sPrinter
+			objPrintConfig.AddQueue(sPrinter)
+			vOutputText "Finished mapping printer: " & sPrinter
+			MapPrinter = true
+		end if
+		
+		vDisplayDefaultPrinter
+		vRefreshDropDowns
+		if bolDebug Then Log EventInformation,"Function MapPrinter finished"
+	End Function
+
+	'Unmap the printer
+	Function UnMapPrinter()		
+		if bolDebug Then Log EventInformation,"Function UnMapPrinter started: " & sPrinter
+		Dim sPrinter
+		Dim iErr
+		
+		sPrinter = selYourPrinters.Value
+		
+		'Check that the spooler is OK
+		if CheckSpooler() = false then
+			exit Function
+		end if 
+		
+		vShowProgress
+		
+		on error resume next
+		WshNetwork.RemovePrinterConnection sPrinter,true,true
+		iErr = err.number
+		on error goto 0
+		
+		vHideProgress
+		
+		'Error checking and logging
+		if iErr <> 0 then
+			if bolDebug then Log EventError,"Failed to unmap printer: " & sPrinter
+			vOutputText "Error! Failed to unmap printer: " & sPrinter
+			UnMapPrinter = false
+		else
+			if bolDebug then Log EventInformation,"Finished unmapping printer: " & sPrinter
+			
+			'OK. Now remove the printer from the user config so we can update the ini
+			objPrintConfig.RemoveQueue(sPrinter)
+			vOutputText "Finished unmapping printer: " & sPrinter
+			UnMapPrinter = true
+		end if
+		
+		vDisplayDefaultPrinter
+		vRefreshDropDowns
+		if bolDebug Then Log EventInformation,"Function UnMapPrinter finished"
+	End Function
+
+	'Log a message to the output and event log
+	Sub Log(pType,pMessage)
+		Dim strMessage
+		Dim oLogFile
+		
+		Dim strPrefix
+		
+		if pType = EventInformation then
+			strPrefix = "INFO: "
+		elseif pType = EventWarning then
+			strPrefix = "WARN: "
+		elseif pType = EventError then
+			strPrefix = "Error: "
+		else
+			strPrefix = ""
+		end if
+		
+		strMessage = strPrefix & Date & " " & Time & " " & pMessage
+
+		if bolDebug = true then
+			set oLogFile = objFSO.OpenTextFile(strLogFile,ForAppending,true)
+			oLogFile.WriteLine strMessage
+			oLogFile.close
+		end if
+		
+		if bolEventLog = true Then WshShell.LogEvent pType,strMessage
+	End Sub
+
+	
+    Sub handleKeypress
+		if bolDebug then Log EventInformation,"Function handleKeypress started"
+    	Select Case window.event.srcElement.name
+    	Case "txtSearch"
+    		If cstr(window.event.keyCode) = "13" then Call searchPrinters
+		Case "txtServer"
+    		If cstr(window.event.keyCode) = "13" then Call searchPrinters
+    	Case "listPrinters"
+	   		If cstr(window.event.keyCode) = "13" Then Call connectPrinter
+    	Case "selYourPrinters"
+    		If cstr(window.event.keyCode) = "13" Then PrintQueue
+  		End Select 
+		if bolDebug then Log EventInformation,"Function handleKeypress finished"
+    End Sub 
+	
+	
+	
+	'======================================
+	'HTA View Functions
+	'======================================
+	
+	'Output text for the user to see. 
+	Sub vOutputText(sText)
+		document.getElementById("textOutput").innerHTML = sText & "<br>" & document.getElementById("textOutput").innerHTML
+		RefreshWindow
+	End Sub
+	
+	'Show the search options pane in the HTA
+	Sub vShowSearchOptions
+		if bolDebug then Log EventInformation,"Function vShowSearchOptions started"
+		Dim sOptions, sServer, sCC, sHV, sWR
+		
+		'record that search options are active for the search query subroutine
+		'bolSearchOptions = true
+		
+		'set the default selections
+		if uCase(strCustomer) = "CCDHB" then
+			sCC = "checked"
+		elseif uCase(strCustomer) = "HVDHB" then
+			sHV = "checked"
+		elseif uCase(strCustomer) = "WRDHB" then
+			sWR = "checked"
+		else 
+			'catch all. machines without the %customer% variable set will normally be CCDHB machines
+			sCC = "checked"
+		end if
+		
+		sOptions = "<input type=""checkbox"" name=""cbCCDHB"" id=""cbCCDHB"" value=""yes"" onclick=""vCheckSearchOptions"" " & sCC & ">CCDHB<br>" & VbCrLf &_
+		"<input type=""checkbox"" name=""cbHVDHB"" id=""cbHVDHB"" value=""yes"" onclick=""vCheckSearchOptions"" " & sHV & ">HVDHB<br>" & VbCrLf &_
+		"<input type=""checkbox"" name=""cbWRDHB"" id=""cbWRDHB"" value=""yes"" onclick=""vCheckSearchOptions""  " & sWR & ">WRDHB"
+
+		document.getElementById("searchOptions").innerHTML = sOptions
+		if bolDebug then Log EventInformation,"Function vShowSearchOptions finished"
+	End Sub
+	
+	Sub vCheckSearchOptions
+		if bolDebug then Log EventInformation,"Function vCheckSearchOptions started"
+		
+		'The the user has unchecked all search options, re-check the default. 
+		if cbCCDHB.checked = false AND cbHVDHB.checked = false AND cbWRDHB.checked = false then
+			if bolDebug then Log EventWarning,"No search option checked. Setting default"
+			
+			'Increment the number of times the user has the warning message
+			intWarnCount = intWarnCount + 1
+			
+			if intWarnCount > 4 then 
+				vOutputText "<b>You must select at least one site. Selecting default!</b>"
+			else
+				vOutputText "You must select at least one site. Selecting default"
+			end if
+			
+			'Refresh the view for the search options. 
+			vShowSearchOptions
+		end if
+		
+		if bolDebug then Log EventInformation,"Function vCheckSearchOptions finished"
+	End Sub
+	
+	'Display the default printer in the HTA. 
+    Sub vDisplayDefaultPrinter
+		if bolDebug then Log EventInformation,"Function vDisplayDefaultPrinter started"
+		Dim iErr, iReturn
+		Dim aSplitText
+		
+		On Error resume Next
+		
+		'Get the default printer from registry.
+		Dim sDefPrinter: sDefPrinter = wshShell.RegRead ("HKEY_CURRENT_USER\Software\Microsoft\Windows NT\CurrentVersion\Windows\Device")
+		iErr = Err.Number
+		
+		On Error goto 0	
+		
+		'Now check the setting against what is in the config file. Sync if different.  
+		If iErr = 0 Then
+			aSplitText = Split(sDefPrinter,",")
+			sDefPrinter = Trim(uCase(aSplitText(0)))
+			
+			if uCase(objPrintConfig.GetDefault()) <> uCase(sDefPrinter) then
+				'Check if it is a network printer first. Don't auto sync non-network printers
+				if Left(sDefPrinter,2) = "\\" then
+					'iReturn = msgBox("Your printer config doesn't match your current default printer." & VbCrLf & "Do you wish to update your printer configuration?",36,"Configuration mismatch")
+					'if iReturn = 6 then
+					objPrintConfig.SetDefault sDefPrinter
+					'end if
+				end if
+			end if
+		end if
+		
+		'See if a simplified view can be displayed e.g. ictw08, rather than \\wn0ntprt04\ictw08
+		if bolAdvOptions = true then
+			'Update the view
+			document.getElementById("lblDefaultPrinter").innerHTML = "<br>Current Default:  <font color='green'>" & sDefPrinter & "</font>"
+		else
+			if left(sDefPrinter,2) = "\\" then
+				aSplitText = Split(sDefPrinter,"\")
+				document.getElementById("lblDefaultPrinter").innerHTML = "<br>Current Default:  <font color='green'>" & aSplitText(3) & "</font>"
+			else
+				document.getElementById("lblDefaultPrinter").innerHTML = "<br>Current Default:  <font color='green'>" & sDefPrinter & "</font>"
+			end if
+		end if
+		if bolDebug then Log EventInformation,"Function vDisplayDefaultPrinter finished"
+    End Sub
+	
+	'Show the progress animation
+	Sub vShowProgress
+		if bolDebug then Log EventInformation,"Function vShowProgress started"
+		document.getElementById("progress").innerHTML = "<img class=progress src=loading.gif alt=loading...>"
+		RefreshWindow
+		if bolDebug then Log EventInformation,"Function vShowProgress finished"
+	End Sub
+	
+	'Hide the progress animation
+	Sub vHideProgress
+		if bolDebug then Log EventInformation,"Function vHideProgress started"
+		document.getElementById("progress").innerHTML = "<p class=progress></p>"
+		if bolDebug then Log EventInformation,"Function vHideProgress finished"
+	End Sub
+	
+	Sub vShowAdvanced
+		if bolDebug then Log EventInformation,"Function vShowAdvanced started"
+		window.resizeTo intWinWidth,intWinHeight+110
+		document.getElementById("advanced").innerHTML = _
+		"<p class=advanced>" &_
+			"<b>Advanced Search Settings</b><br>" &_
+			"<input type=""checkbox"" name=""cbSearchDir"" id=""cbSearchDir"" value=""yes"" checked OnClick=vbscript:vUpdateAdvanced(""dir"")>Search directory<br>" &_
+			"<input type=""checkbox"" name=""cbSearchEntDir"" id=""cbSearchEntDir"" value=""yes"" OnClick=vbscript:vUpdateAdvanced(""entire_dir"")>Search entire directory<br>" &_
+			"<input type=""checkbox"" name=""cbSpecificServer"" id=""cbSpecificServer"" value=""yes"" OnClick=vbscript:vUpdateAdvanced(""spec"")>Search specific server " &_
+			"<input type=""text"" size=""20"" name=""txtServer"" id=""txtServer"" onkeypress=""handleKeyPress"" tabindex=""0"" title=""Enter the name of a print server""><br><br>" &_
+			"<a href=""#"" onClick=vbscript:RunWizard>Add printer manually</a><br><br>" &_
+			"<a href=""#"" onClick=vbscript:vHideAdvanced>Hide advanced</a>" &_
+		"</p>"
+		
+		'document.getElementById("searchOptions").innerHTML = ""
+		
+		bolAdvOptions = true
+		vRefreshDropDowns
+		vDisplayDefaultPrinter
+		if bolDebug then Log EventInformation,"Function vShowAdvanced finished"
+	End Sub
+	
+	'Make sure appropriate selections are made. 
+	Sub vUpdateAdvanced(pOption)
+		if bolDebug then Log EventInformation,"Function vUpdateAdvanced started"
+		
+		'Check that the user hasn't cleared everything 
+		if cbSpecificServer.Checked = false AND cbSearchDir.Checked = false AND cbSearchEntDir.Checked = false then
+			vOutputText "You must select one search option. Defaulting to search entire directory"
+			cbSearchEntDir.Checked = true
+		else
+			'Now check/uncheck options that are mutually exclusive. 
+			if ucase(pOption) = "DIR" then
+				cbSearchEntDir.Checked = false
+			elseif ucase(pOption) = "ENTIRE_DIR" then
+				cbSearchDir.Checked = false
+				cbSpecificServer.Checked = false
+			elseif ucase(pOption) = "SPEC" then
+				cbSearchEntDir.Checked = false
+			end if
+		end if
+		
+		
+		if bolDebug then Log EventInformation,"Function vUpdateAdvanced finished"
+	End Sub
+	
+	
+	Sub vHideAdvanced
+		if bolDebug then Log EventInformation,"Function vHideAdvanced started"
+		window.resizeTo intWinWidth,intWinHeight
+		document.getElementById("advanced").innerHTML = "<a style=""vertical-align:bottom;font-size:10px"" href=""#"" onClick=vbscript:vShowAdvanced>Advanced</a><br>"
+		bolAdvOptions = false
+		vRefreshDropDowns
+		'vShowSearchOptions
+		if bolDebug then Log EventInformation,"Function vHideAdvanced finished"
+	End Sub
+	
+   
+	'Update the selYourPrinters options list. 
+	Sub vRefreshDropDowns
+		if bolDebug then Log EventInformation,"Function vRefreshDropDowns started"
+		Dim oPrinters
+		Dim oOption
+		Dim intCount
+		Dim aSplitText
+		Dim sPrinter
+		
+		'Clear the list
+		If selYourPrinters.options.length > 0 then
+			For intCount = 0 To selYourPrinters.options.length -1
+				'MsgBox "Item " & i
+				selYourPrinters.options.remove 0
+			Next
+		End If
+			
+		Set oPrinters = wshNetwork.EnumPrinterConnections
+		
+		'Populate list of printers available for a default printer
+		For intCount = 0 To oPrinters.Count -1 Step 2
+			set oOption = document.createElement("OPTION")
+			selYourPrinters.options.add oOption
+			
+			sPrinter = oPrinters(intCount+1)
+			
+			'if in advanced view, show the full paths.
+			if bolAdvOptions then 
+				oOption.innerText = sPrinter
+				oOption.value = sPrinter
+			else
+				'simplify the view for network printers. 
+				if left(sPrinter,2) = "\\" then
+					aSplitText = split(sPrinter,"\")
+					oOption.innerText = aSplitText(3)
+					oOption.value = sPrinter
+				else 
+					oOption.innerText = sPrinter
+					oOption.value = sPrinter
+				end if
+			end if
+		Next
+		if bolDebug then Log EventInformation,"Function vRefreshDropDowns finished"
+	End Sub
+
+	
+	
+	'Display the printer details for the selected printer
+	Sub vPrinterDetails
+		if bolDebug then Log EventInformation,"Function vPrinterDetails started"
+		
+		Dim iErr
+		
+		'Check that the spooler is OK
+		if CheckSpooler() = false then
+			exit sub
+		end if
+		
+		'If an empty space is clicked, exit the sub as there is nothing to do
+		If listPrinters.Value = "" Then Exit Sub 
+
+		Dim strPrintQueue, strPrinterName, strPrintSearch
+		Dim intCount
+		Dim objPrinter, objPrintQueue, objOption
+		
+		strPrintQueue=listPrinters.Value
+		
+		if bolDebug then Log EventInformation,"Print queue: " & strPrintQueue
+		
+		strPrintSearch=Replace(strPrintQueue,"\","/",3) 'Convert the print queue into something that can be searched
+
+		if bolDebug then Log EventInformation,"Converted print queue: " & strPrintSearch
+		
+		'Tell the user what is going on.
+		document.getElementById("details").innerHTML = "Refreshing. Please wait...."
+		
+		on error resume next
+		'Enumerate the print server. Get shared printers
+		Set objPrinter = GetObject("WinNT://" & strPrintSearch & ",printqueue")
+		iErr = err.number
+		on error goto 0
+		
+		if iErr = 0 then
+			document.getElementById("details").innerHTML =  "<b>Printer:</b> " & objPrinter.Name & "<br>" &_
+			"<b>Location:</b> " & objPrinter.Location & "<br>" &_
+			"<b>Model:</b> " & objPrinter.Model & "<br>" &_
+			"<b>Comment:</b> " & objPrinter.Description & "<br>" &_
+			"<b>Network Path:</b> " & objPrinter.PrinterPath & "<br>"
+		else
+			document.getElementById("details").innerHTML =  "Failed to display print queue details"
+		end if
+		
+		if bolDebug then Log EventInformation,"Function vPrinterDetails finished"
+	End Sub
+	
+
+'==========================================================================================================
+'PrintConfig class. Contains all user printer config 
+'==========================================================================================================
+Class PrintConfig
+		
+	Private dicPrtSvrs, dicSettings, dicGlobals, dicLegacyMappings
+	Private strDefaultQueue, strDefaultSvr, strMaintDate
+	Private strLastMaint
+	
+	Private Sub Class_Initialize()
+		set dicPrtSvrs = CreateObject("Scripting.Dictionary")
+		set dicSettings = CreateObject("Scripting.Dictionary")
+		set dicGlobals = CreateObject("Scripting.Dictionary")
+		set dicLegacyMappings = CreateObject("Scripting.Dictionary")
+	End Sub
+		  
+	Private Sub Class_Terminate()
+		Set dicPrtSvrs = Nothing
+		Set dicSettings = nothing
+	End Sub
+
+	'Get a setting
+	Public Function GetSetting(pSetting)
+		if bolDebug then Log EventInformation, "GetSetting function start."		
+		Dim sValue, sSetting
+		
+		sSetting = Trim(uCase(pSetting))
+		
+		if dicSettings.Exists(sSetting) then
+			sValue = dicSettings.Item(sSetting)
+			if bolDebug then Log EventInformation," Setting: " & sSetting & " - Value: " & sValue
+			GetSetting = sValue
+		Elseif dicGlobals.Exists(sSetting) then
+			sValue = dicGlobals.Item(sSetting)
+			if bolDebug then Log EventInformation," Global setting: " & sSetting & " - Value: " & sValue
+			GetSetting = sValue
+		Else
+			if bolDebug then Log EventInformation," Setting not found: " & sSetting
+			GetSetting = false
+		end if
+		if bolDebug then Log EventInformation, "GetSetting function finished."	
+	End Function
+	
+	'Set a user setting
+	Public Function SetUserSetting(pSetting,pValue)
+		if bolDebug then Log EventInformation, "SetUserSetting function start."	
+		if dicSettings.Exists(uCase(pSetting)) then
+			if bolDebug then Log EventInformation," Updating setting: " & pSetting & ". Value: " & pValue
+			dicSettings.Item(uCase(pSetting)) = uCase(pValue)
+		else
+			if bolDebug then Log EventInformation," Adding setting: " & pSetting & ". Value: " & pValue
+			dicSettings.Add uCase(pSetting),uCase(pValue)
+		end if
+		
+		if bolDebug then Log EventInformation, "SetUserSetting function finished."	
+	End Function
+	
+	'Add a queue to the users dictionaries. Expects in format \\x\y
+	Public Function AddQueue(pPath)
+		if bolDebug then Log EventInformation, "AddQueue function start."
+		Dim aLine
+		Dim dTempDic
+		Dim sSvr, sQueue
+		
+		'check that the path has the correct format e.g. \\x\y
+		if not left(pPath,2) = "\\" then
+			if bolDebug then Log EventWarning, "Invalid queue: " & pPath
+			AddQueue = false
+			exit function
+		end if
+		
+		'Split the line up so it can be used. 
+		aLine = Split(pPath,"\")
+		
+		'Double check that the path has the correct format e.g. \\x\y
+		if UBound(aLine) < 3 then
+			AddQueue = false
+		Else
+			sSvr = uCase(aLine(2))
+			sQueue = uCase(aLine(3))
+		end if 
+		
+		'If the print server doesn't exist in the dictionary, add it.
+		if not dicPrtSvrs.Exists(sSvr) then
+			Set dTempDic = CreateObject("Scripting.Dictionary")
+
+			if bolDebug then Log EventInformation,"Adding server dictionary: " & sSvr
+			dicPrtSvrs.Add sSvr,dTempDic
+					
+			'Add the queue to the new dictionary object for the server
+			if bolDebug then Log EventInformation,"Adding queue to dictionary: " & sQueue
+			dTempDic.Add sQueue,uCase(pPath)
+		end if 
+		
+		'Map to the servers dictionary object
+		Set dTempDic = dicPrtSvrs.Item(sSvr)
+				
+		'If the print queue doesn't exist in the dictionary, add it.
+		if not dTempDic.Exists(sQueue) then
+			if bolDebug then Log EventInformation,"Adding queue to dictionary: " & sQueue
+			dTempDic.Add sQueue,pPath
+			
+		end if 
+		
+		'Test and return true if ok
+		if dTempDic.Exists(sQueue) then AddQueue = true
+	End function
+	
+	'Remove a queue to the users dictionaries. Expects in format \\x\y
+	'Will be used for maintenance functions
+	Public Function RemoveQueue(pPath)
+		if bolDebug then Log EventInformation, "RemoveQueue function start."	
+		
+		'First check the queue exists
+		if QueryQueue(pPath) = false then 	
+			Log EventWarning,"Failed to remove queue" & pPath & ". Queue is not in the database"
+			RemoveQueue = false
+			exit function
+		end if 
+		
+		
+		Dim aLine
+		Dim dTempDic
+		Dim sSvr, sQueue
+		'Split the line up so it can be used. 
+		aLine = Split(pPath,"\")
+		
+
+		
+		'check that the path has the correct format e.g. \\x\y
+		if UBound(aLine) < 3 then
+			SetDefault = false
+		Else
+			sSvr = Trim(uCase(aLine(2)))
+			sQueue = Trim(uCase(aLine(3)))	
+		end if 
+	
+		'Map to the servers dictionary object
+		Set dTempDic = dicPrtSvrs.Item(sSvr)
+		
+		if bolDebug then Log EventWarning, "Removing queue from database: " & pPath
+		dTempDic.Remove(sQueue)
+		RemoveQueue = true 
+		
+		'Now see if there are any queues left for that server. If so, remove it too
+		
+		if dTempDic.Count = 0 then 
+			if bolDebug then Log EventWarning, sSvr & " server dictionary is empty. Deleting."
+			dicPrtSvrs.Remove(sSvr)
+		end if 
+		
+		'Now check the default printer. if this server is used, clear the default as well. 
+		if uCase(GetDefault()) = uCase(pPath) then
+			if bolDebug then Log EventWarning,"Queue was the default. Clearing default"
+			dicSettings.Remove "DEFAULT"
+		end if 
+	End function
+
+	'Set the default printer, parsed in the format \\x\y
+	Public Function SetDefault(pDefPath)
+		if bolDebug then Log EventInformation, "SetDefault function start."
+		Dim aLine
+		
+		'Make sure the queue is in the dictionaries as expected
+		AddQueue pDefPath 	
+		
+		if dicSettings.Exists("DEFAULT") then
+			dicSettings.Item("DEFAULT") = pDefPath
+		else	
+			dicSettings.Add "DEFAULT",pDefPath
+		end if
+		
+		SetDefault = true
+		
+	end Function
+	
+	'Get the default printer in the format \\x\y
+	Public Function GetDefault()
+		if bolDebug then Log EventInformation, "GetDefault function start."
+		If not dicSettings.Exists("DEFAULT") then
+			if bolDebug then Log EventInformation,"No default printer configured" 
+			GetDefault = false		'return false if there is no default set. 
+		else
+			GetDefault = dicSettings.Item("DEFAULT")
+		End if 
+	end Function
+	
+	'Replace a queue with another queue. Expects queues in the \\x\y format
+	Public Function ReplaceQueue(pOldQueue,pNewQueue)	
+		if bolDebug then Log EventInformation, "ReplaceQueue function start."
+		Dim sOldQueue, sNewQueue
+
+		sOldQueue = Trim(uCase(pOldQueue))
+		sNewQueue = Trim(uCase(pNewQueue))
+		
+		'First check that the old queue is in the database
+		if QueryQueue(sOldQueue) = true then
+			'add the new queue and remove the old one. 
+			If AddQueue(sNewQueue) then 
+				RemoveQueue sOldQueue
+				ReplaceQueue = true
+			else
+				Log EventWarning, "ReplaceQueue failed. Old queue: " & sOldQueue & ". New queue: " & sNewQueue
+				ReplaceQueue = false
+			end if
+		Else
+			if bolDebug then Log EventWarning,"Queue to be replaced " & sOldQueue & " not found in database. Exiting function"
+			ReplaceQueue = false
+		end if
+		
+	End Function
+		
+	'Replace an entire server. Use this to move all queues from one server to another. 
+	Public Function ReplaceServer(pOldServer,pNewServer)
+		if bolDebug then Log EventInformation, "ReplaceServer function start."
+		
+		Dim sPrtQueue, sOldServer, sNewServer
+		Dim dTempDic
+		
+		sOldServer = Trim(uCase(pOldServer))
+		sNewServer = Trim(uCase(pNewServer))
+		
+		If dicPrtSvrs.Exists(sOldServer) then
+			'Load up the server's dictionary
+			Set dTempDic = dicPrtSvrs.Item(sOldServer)
+			
+			'Loop through the dictionary and create the new queues for the new server
+			for each sPrtQueue in dTempDic.Keys
+				AddQueue "\\" & sNewServer & "\" & sPrtQueue
+			next
+			
+			'now remove the old server
+			if bolDebug then Log EventWarning,"Removing server: " & sOldServer
+			dicPrtSvrs.Remove(sOldServer)
+			ReplaceServer = true
+		Else
+			if bolDebug then Log EventWarning,"Server to be replaced " & sOldServer & " not found in database."
+			ReplaceServer = false
+		End if
+		
+		if bolDebug then Log EventInformation, "ReplaceServer function finished."
+	End Function
+		
+	'Remove an entire server
+	Public Function RemoveServer(pServer)
+		if bolDebug then Log EventInformation, "RemoveServer function start."	
+		
+		Dim sServer, sDefServer
+		Dim arrSplit
+		
+		sServer = Trim(uCase(pServer))
+		
+		'Check the server exists
+		If dicPrtSvrs.Exists(sServer) then
+			'now remove the old server
+			if bolDebug then Log EventWarning,"Removing server: " & sServer
+			dicPrtSvrs.Remove(sServer)
+
+			'Now check the default printer. if this server is used, clear the default as well. 
+			if strDefaultSvr = sServer then
+				if bolDebug then Log EventWarning,"Server is part of default queue. Clearing default"
+				strDefaultSvr = empty
+				strDefaultQueue = empty
+			end if 
+			
+			RemoveServer = false
+		Else
+			if bolDebug then Log EventWarning,"Server to be removed " & sServer & " not found in database. Exiting function"
+			RemoveServer = false
+			exit function
+		End if
+	End Function
+	
+	'Return all print queues as an array
+	Public Function GetAllQueues()
+		Dim diSvrItem, diQueueItem
+		Dim strSvr
+		Dim strOutput,iCount
+		Dim aQueues()
+		
+		if bolDebug then Log EventInformation, "GetAllQueues function called: "
+		strOutput = " Queues:"
+		
+		iCount = 0
+		
+		'List all the queues from the dictionaries
+		For Each strSvr in dicPrtSvrs.Keys()
+			Set diSvrItem = dicPrtSvrs.Item(strSvr)
+			strOutput = strOutput & VbCrLf & "  Server: " & strSvr
+			
+			For Each diQueueItem in diSvrItem.Items()
+				
+				'Expand the array
+				ReDim Preserve aQueues(iCount)
+				
+				'Add the item to the array
+				aQueues(iCount)=diQueueItem
+				strOutput = strOutput & VbCrLf & "   " & diQueueItem
+				iCount = iCount + 1
+				
+			Next
+		next 
+		
+		'Pass the array back
+		GetAllQueues = aQueues
+		
+		if bolDebug then Log EventInformation,strOutput
+	End Function
+	
+	'Return all print queues on a server as an array. Queues formatted as \\x\y
+	Public Function GetServerQueues(pSvr)
+		Dim diSvrItem, sQueue
+		Dim sOutput,iCount,sSvr
+		Dim aQueues()
+		
+		sSvr = Trim(uCase(pSvr))
+		
+		sOutput = "GetServerQueues function called: " & sSvr
+		
+		
+		iCount = 0
+		
+		'List all the queues from the dictionary
+		If dicPrtSvrs.Exists(sSvr) then 
+			sOutput = sOutput & VbCrLf & " Queues:"
+			
+			Set diSvrItem = dicPrtSvrs.Item(sSvr)
+			sOutput = sOutput & VbCrLf & "  Server: " & sSvr
+			
+			For Each sQueue in diSvrItem.Items()
+				
+				'Expand the array
+				ReDim Preserve aQueues(iCount)
+				
+				'Add the item to the array
+				aQueues(iCount)=sQueue
+				sOutput = sOutput & VbCrLf & "   " & sQueue
+				iCount = iCount + 1	
+			Next
+		Else
+			sOutput = sOutput & VbCrLf & " No queues found"
+		End if 
+		GetServerQueues = aQueues
+		if bolDebug then Log EventInformation,sOutput
+	End Function
+	
+	'Return all print queues on servers is the legacy servers dictionary. Queues returned in the format y, not \\x\y
+	Public Function GetLegacyServerQueues()
+		Dim diSvrItem, sQueue
+		Dim sOutput,iCount,sSvr
+		Dim aQueues(), aServers, aSvrQueues, aSplitText
+
+		sOutput = "GetLegacyServerQueues function called"
+		iCount = 0	
+		aServers = dicLegacyMappings.Keys()
+		
+		'First check that there are some legacy mappings
+		if IsArray(aServers) = false then 
+			if bolDebug then Log EventInformation,"No legacy mappings. Exiting function"
+			GetLegacyServerQueues = false
+			exit function
+		else
+			'Now loop through the servers and get their queues. 
+			'add the queues to the array. 
+			for each sSvr in aServers
+				aSvrQueues = GetServerQueues(sSvr)				
+				if IsArray(aSvrQueues) = false then 
+					if bolDebug then Log EventInformation,"Server " & sSvr & " not in users config. Skipping"
+				else	
+					if bolDebug then Log EventInformation,"Adding printers to array"
+					for each sQueue in aSvrQueues
+						if bolDebug then Log EventInformation,"  " & sQueue
+						aSplitText = Split(sQueue,"\")
+						'Expand the array
+						ReDim Preserve aQueues(iCount)
+						
+						'Add the item to the array
+						aQueues(iCount)=aSplitText(3)
+						iCount = iCount + 1	
+					Next 
+					
+					iCount = 0
+				end if
+			next 
+		end if
+		'return the array of queues
+		GetLegacyServerQueues = aQueues
+	End Function
+	
+	'Query for a queue in the users dictionaries. Expects in format \\x\y
+	Public Function QueryQueue(pPath)
+		if bolDebug then Log EventInformation, "QueryQueue function start."	
+		Dim aLine
+		Dim dTempDic
+		Dim sSvr, sQueue
+		'Split the line up so it can be used. 
+		aLine = Split(pPath,"\")
+		
+
+		
+		'check that the path has the correct format e.g. \\x\y
+		if UBound(aLine) < 3 then
+			SetDefault = false
+		Else
+			sSvr = uCase(aLine(2))
+			sQueue = uCase(aLine(3))	
+		end if 
+		
+		'Check if the server exists at all in the users config
+		if dicPrtSvrs.Exists(sSvr) then		
+			'Map to the servers dictionary object
+			Set dTempDic = dicPrtSvrs.Item(sSvr)
+			if dTempDic.Exists(sQueue) then	
+				if bolDebug then Log EventInformation, "Queue found: " & pPath
+				QueryQueue = true
+			else
+				'queue doesn't exist. exit function
+				Log EventInformation,"Queue " & pPath & " not found in the database"
+				QueryQueue = False
+				exit function
+			end if
+		Else
+				'queue doesn't exist. exit function
+				Log EventInformation,"Queue " & pPath & " not found in the database"
+				QueryQueue = False
+				exit function
+		end if 
+	End function
+	
+	'Output the config information
+	Public Function ListAll()
+		Dim diSvrItem, diQueueItem
+		Dim sOutput, sKey
+		
+		sOutput = "ListAll function called: "
+		sOutput = sOutput & VbCrLf & " Queues:"
+		
+		'List all the queues from the dictionaries
+		For Each diSvrItem in dicPrtSvrs.Items()
+			For Each diQueueItem in diSvrItem.Items()
+				sOutput = sOutput & VbCrLf & "   " & diQueueItem
+			Next
+		next 
+		
+		'Show the default
+		sOutput = sOutput & VbCrLf & " Default: " & GetDefault()
+		
+		'List all the settings from the dictionaries
+		sOutput = sOutput & VbCrLf & " Global Settings:"
+		For Each sKey in dicGlobals.Keys()
+			sOutput = sOutput & VbCrLf & "  " &  sKey & "=" & dicGlobals.Item(sKey)
+		next 
+		
+		sOutput = sOutput & VbCrLf & " User Settings:"
+		For Each sKey in dicSettings.Keys()
+			sOutput = sOutput & VbCrLf & "  " & sKey & "=" & dicSettings.Item(sKey)
+		next 
+		
+		'List legacy mappings
+		sOutput = sOutput & VbCrLf & " Legacy server mappings:"
+		For Each sKey in dicLegacyMappings.Keys()
+			sOutput = sOutput & VbCrLf & "  " & sKey
+		next 
+		
+		ListAll = sOutput
+		
+		Log EventInformation, sOutput
+	End Function
+	
+	'Output the servers in the config
+	Public Sub ListServers()
+		Dim diSvrItem
+		Dim strOutput
+		
+		strOutput = "ListSvrs function called: "
+		strOutput = strOutput & VbCrLf & " Servers:"
+		
+		'List all the Servers from the dictionaries
+		For Each diSvrItem in dicPrtSvrs.Keys()
+			strOutput = strOutput & VbCrLf & "   " & diSvrItem
+		next 
+		
+		Log EventInformation, strOutput
+	End Sub
+	
+	'Import the new format Ini file 
+	Public Function ImportIni(pIni)
+		if bolDebug then Log EventInformation, "ImportIni function start."
+		Dim sPrtSvr
+		Dim arrSplitText
+		Dim sIniLine, sIniName
+		Dim oFile
+		Dim oFSO: Set oFSO = CreateObject("Scripting.FileSystemObject")
+		
+		if bolDebug then Log EventInformation,"Ini file: " & pIni
+		
+		'Check to see if the file exists...if not then quit
+		If Not oFSO.FileExists(pIni) Then
+			if bolDebug then Log EventWarning,"Ini file not found: " & pIni & VbCrLf
+			ImportIni = false
+			exit function
+		End If
+		
+		'First get the ini file information for logging
+		set oFile = oFSO.GetFile(pIni)		
+		sIniName = oFSO.GetFileName(oFile)
+			
+		'Open the file
+		set oFile = oFSO.OpenTextFile(pIni,ForReading)
+		
+		'Read the first line
+		sIniLine = ReadLine(oFile)
+			
+		'Start reading the file
+		Do While oFile.AtEndOfStream <> True
+			
+			
+			'General settings section
+			if UCase(sIniLine) = UCase("[Settings]") Then 
+				if bolDebug then Log EventInformation,"Reading "  & sIniLine & " section from " & sIniName
+
+				'Now keep reading
+				Do While oFile.AtEndOfStream <> True
+					'Read the next line
+					sIniLine = ReadLine(oFile)
+					if sIniLine = false then exit do
+					
+					If Left(sIniLine,1)="[" Then
+						if bolDebug then Log EventInformation,"End of section"
+						Exit do 			'we have reached the end of the block
+					Else
+						'Split the string into the two parts. The parameter and the field/data
+						arrSplitText = Split(sIniLine,"=",2,1)
+						
+						SetUserSetting arrSplitText(0),arrSplitText(1)
+					End If
+				Loop
+			End if
+			
+			'Print server sections
+			if Trim(UCase(sIniLine)) = uCase("[Queues]") Then 
+				if bolDebug then Log EventInformation,"Reading "  & sIniLine & " section from " & sIniName
+			
+				'Now keep reading
+				Do While oFile.AtEndOfStream <> True
+					'Read the next line
+					sIniLine = ReadLine(oFile)
+					if sIniLine = false then exit do
+					
+					If Left(sIniLine,1)="[" Then
+						if bolDebug then Log EventInformation,"End of section"
+						Exit do 			'we have reached the end of the block
+					Else
+						'add the queue to the dictionaries
+						AddQueue sIniLine
+					End If
+				Loop
+			End if
+		Loop
+		
+		oFile.close
+
+		'Make sure default is set properly
+		if dicSettings.Exists("DEFAULT") then
+			SetDefault(dicSettings.Item("DEFAULT"))
+		end if
+		if bolDebug then Log EventInformation,"ImportIni Finished" & VbCrLf
+	End Function
+		
+	'Import the new format Ini file 
+	Public Function ImportGlobals(pIni)
+		if bolDebug then Log EventInformation, "ImportGlobals function start."
+		Dim sPrtSvr
+		Dim arrSplitText
+		Dim sIniLine, sIniName
+		Dim oFile
+		Dim oFSO: Set oFSO = CreateObject("Scripting.FileSystemObject")
+		
+		if bolDebug then Log EventInformation,"Ini file: " & pIni
+		
+		'Check to see if the file exists...if not then quit
+		If Not oFSO.FileExists(pIni) Then
+			if bolDebug then Log EventWarning,"Ini file not found: " & pIni & VbCrLf
+			ImportGlobals = false
+			exit function
+		End If
+		
+		'First get the ini file information for logging
+		set oFile = oFSO.GetFile(pIni)		
+		sIniName = oFSO.GetFileName(oFile)
+			
+		'Open the file
+		set oFile = oFSO.OpenTextFile(pIni,ForReading)
+		
+		'Read the first line
+		sIniLine = ReadLine(oFile)
+			
+		'Start reading the file
+		Do While oFile.AtEndOfStream <> True
+			
+			
+			'General settings section
+			if UCase(sIniLine) = UCase("[Settings]") Then 
+				if bolDebug then Log EventInformation,"Reading "  & sIniLine & " section from " & sIniName
+
+				'Now keep reading
+				Do While oFile.AtEndOfStream <> True
+					'Read the next line
+					sIniLine = ReadLine(oFile)
+					if sIniLine = false then exit do
+					
+					If Left(sIniLine,1)="[" Then
+						if bolDebug then Log EventInformation,"End of section"
+						Exit do 			'we have reached the end of the block
+					Else
+						'Split the string into the two parts. The parameter and the field/data
+						arrSplitText = Split(sIniLine,"=",2,1)
+						if bolDebug then Log EventInformation,"Adding setting: " & arrSplitText(0) & VbCrLf & " Value: " & arrSplitText(1)
+						if dicGlobals.Exists(uCase(arrSplitText(0))) then
+							dicGlobals.Item(uCase(arrSplitText(0))) = uCase(arrSplitText(1))
+						else
+							dicGlobals.Add uCase(arrSplitText(0)),uCase(arrSplitText(1))
+						end if
+					End If
+				Loop
+			
+			'Legacy mappings section. This section is for print servers that have an equivalent queue on the old print server.
+			'This creates a 'many to one' listing of servers so we can create an ini file that the old environment can use. 
+			Elseif UCase(sIniLine) = UCase("[LegacyMappings]") Then 
+				if bolDebug then Log EventInformation,"Reading "  & sIniLine & " section from " & sIniName
+
+				'Now keep reading
+				Do While oFile.AtEndOfStream <> True
+					'Read the next line
+					sIniLine = ReadLine(oFile)
+					if sIniLine = false then exit do
+					
+					If Left(sIniLine,1)="[" Then
+						if bolDebug then Log EventInformation,"End of section"
+						Exit do 			'we have reached the end of the block
+					Else
+						if bolDebug then Log EventInformation,"Adding legacy mapping: " & sIniLine
+						if Not dicLegacyMappings.Exists(uCase(sIniLine)) then
+							dicLegacyMappings.Add uCase(sIniLine),""
+						end if
+					End If
+				Loop
+			End if
+		Loop
+		
+		oFile.close
+
+		if bolDebug then Log EventInformation,"ImportGlobals Finished" & VbCrLf
+	End Function
+
+	'Import the new format Ini file 
+	Public Function ExportIni(pIni)
+		if bolDebug then Log EventInformation, "ExportIni function start."
+		Dim sQueue
+		Dim arrSplitText
+		Dim sIniLine, sIniName, sSetting
+		Dim oFile
+		Dim oFSO: Set oFSO = CreateObject("Scripting.FileSystemObject")
+		
+		if bolDebug then Log EventInformation,"Ini file: " & pIni
+		
+		'First get the ini file information for logging
+		if oFSO.FileExists(pIni) then
+			if bolDebug then Log EventInformation, "Getting ini file information"
+			set oFile = oFSO.GetFile(pIni)		
+			sIniName = oFSO.GetFileName(oFile)
+		else
+			'If it doesn't exist, create it.
+			if bolDebug then Log EventInformation, "Ini file " & pIni & " doesn't exist. Creating"			
+			oFSO.CreateTextFile(pIni)
+			set oFile = oFSO.GetFile(pIni)		
+			sIniName = oFSO.GetFileName(oFile)
+		end if
+		
+		'Open the file
+		set oFile = oFSO.OpenTextFile(pIni,ForWriting)
+		
+		'Write the [Queues] section
+		oFile.WriteLine "[Queues]"
+		
+		For each sQueue in GetAllQueues()
+			'Write the queue to the file
+			if bolDebug then Log EventInformation, "Writing queue: " & sQueue
+			oFile.WriteLine sQueue
+		next
+		
+		'Now write out the settings
+		if bolDebug then Log EventInformation, "Writing settings"
+		oFile.WriteLine VbCrLf & "[Settings]"
+		
+		For each sSetting in dicSettings.Keys
+			oFile.WriteLine sSetting & "=" & dicSettings.Item(sSetting)
+		next
+		
+		oFile.Close
+		
+		if bolDebug then Log EventInformation, "ExportIni finished" & VbCrLF
+	End Function
+	
+	'Import the old format Ini file 
+	Public Function ImportLegacyIni(pCPrint,pUPrint)
+		if bolDebug then Log EventInformation, "ImportLegacyIni function start."
+		Dim sPrtSvr
+		Dim arrSplitText
+		Dim sIniLine
+		Dim oFile
+		Dim oFSO: Set oFSO = CreateObject("Scripting.FileSystemObject")
+			
+		sPrtSvr = GetLegacyServer(pCPrint)
+		
+		If sPrtSvr = False then 
+			if bolDebug then Log EventError,"Can't find legacy print server. Exiting function" & VbCrLf
+			exit function
+		End if
+		
+		if bolDebug then Log EventInformation,"Legacy print server: " & sPrtSvr
+		if bolDebug then Log EventInformation,"Importing cPrint: " & pCPrint
+		if bolDebug then Log EventInformation,"Importing uPrinters: " & pUPrint
+		
+		'Check to see if the file exists...if not then quit
+		If Not oFSO.FileExists(pUPrint) Then
+			if bolDebug then Log EventWarning,"Ini file not found: " & pUPrint & VbCrLf
+			ImportLegacyIni = false
+			exit function
+		End If
+		
+		'Open the file
+		set oFile = oFSO.OpenTextFile(pUPrint,ForReading)
+		
+		'Start reading the file
+		Do While oFile.AtEndOfStream <> True
+			'Read the next line
+			sIniLine = ReadLine(oFile)
+			if sIniLine = false then exit do
+			
+			if UCase(sIniLine) = UCase("[General]") Then 
+				if bolDebug then Log EventInformation,"Reading [General] section from uPrinters.ini"
+
+				'Now keep reading
+				Do While oFile.AtEndOfStream <> True
+					'Read the next line
+					sIniLine = ReadLine(oFile)
+					if sIniLine = false then exit do
+					
+					If Left(sIniLine,1)="[" Then
+						if bolDebug then Log EventInformation,"End of section"
+						Exit do 			'we have reached the end of the block
+					Else
+						'Split the string into the two parts. The parameter and the field/data
+						arrSplitText = Split(sIniLine,"=",2,1)
+						
+						If Ucase(arrSplitText(0)) = UCase("DefaultPrinter") Then
+							if bolDebug then Log EventInformation,"Adding default printer: " & arrSplitText(1)
+							'add the queue to the dictionaries
+							SetDefault("\\" & sPrtSvr & "\" & arrSplitText(1))
+							Exit Do
+						End if
+					End If
+				Loop
+			End if
+			
+			if UCase(sIniLine) = UCase("[UserPrinters]") Then 
+				if bolDebug then Log EventInformation,"Reading [UserPrinters] section from uPrinters.ini"
+
+				'Now keep reading
+				Do While oFile.AtEndOfStream <> True
+					'Read the next line
+					sIniLine = ReadLine(oFile)
+					if sIniLine = false then exit do
+					
+					If Left(sIniLine,1)="[" Then
+						if bolDebug then Log EventInformation,"End of section"
+						Exit do 			'we have reached the end of the block
+					Else
+						'Split the string into the two parts. The parameter and the field/data
+						arrSplitText = Split(sIniLine,"=",2,1)
+						
+						If Left(Ucase(arrSplitText(0)),5) = UCase("Print") Then
+							if bolDebug then Log EventInformation,"Adding printer: " & arrSplitText(1)
+							'add the queue to the dictionaries
+							AddQueue("\\" & sPrtSvr & "\" & arrSplitText(1))
+						End if
+					End If
+				Loop
+			End if
+		Loop
+		oFile.close
+		
+		'Set new default settings if they don't exist
+		if GetSetting("SetDefault") = false then SetUserSetting "SetDefault","Yes"
+									
+		if bolDebug then Log EventInformation, "ImportLegacyIni function finished." & VbCrLf
+	End Function
+	
+	'Export the old format Ini file 
+	Public Function ExportLegacyFromCPrint(pCPrint,pUPrint)
+		if bolDebug then Log EventInformation, "ExportLegacyFromCPrint function start."
+		Dim sPrtSvr, sDefault, sQueue
+		Dim diTempDic
+		Dim arrSplitText
+		Dim oFile
+		Dim iCount
+		Dim oFSO: Set oFSO = CreateObject("Scripting.FileSystemObject")
+			
+		sPrtSvr = GetLegacyServer(pCPrint)
+		
+		If sPrtSvr = False then 
+			if bolDebug then Log EventError,"Can't find legacy print server. Exiting function" & VbCrLf
+			ExportLegacyFromCPrint = false
+			exit function
+		End if
+		
+		if bolDebug then Log EventInformation,"Legacy print server: " & sPrtSvr
+		if bolDebug then Log EventInformation,"Export cPrint: " & pCPrint
+		if bolDebug then Log EventInformation,"Exporting uPrinters: " & pUPrint
+		
+		'first check if the print server exists in the config. If it doesn't, clear the uprinters file and exit.
+		if not dicPrtSvrs.Exists(sPrtSvr) then 
+			if oFSO.FileExists(pUPrint) then
+				if bolDebug then Log EventWarning,"Server " & sPrtSvr & " not found in config. " & VbCrLf & "  Deleting: "  & pUPrint
+				oFSO.DeleteFile pUPrint,true
+				ExportLegacyFromCPrint = true
+				exit function
+			end if
+		else
+			if bolDebug then Log EventWarning,"Server " & sPrtSvr & " found in config. "
+		end if
+		
+		'Check to see if the uprinters file exists
+		If Not oFSO.FileExists(pUPrint) Then
+			if bolDebug then Log EventWarning,"Ini file not found: " & pUPrint & VbCrLf & "Creating..."
+			'Open the file
+			set oFile = oFSO.CreateTextFile(pUPrint)
+		Else
+			if bolDebug then Log EventWarning,"Ini file found: " & pUPrint & VbCrLf & "Writing new config"
+			'Open the file
+			set oFile = oFSO.OpenTextFile(pUPrint,ForWriting)		
+		End If
+		
+		'Now start writing the file	
+		if bolDebug then Log EventInformation,"Writing [General] section"
+		oFile.WriteLine "[General]"
+		
+		'Now see if the default printer is assigned to the print server being exported.
+		sDefault = GetDefault()		
+		arrSplitText = Split(sDefault,"\")
+		
+		if sDefault = arrSplitText(2) then
+			oFile.WriteLine "DefaultPrinter=" & arrSplitText(3) & VbCrLf
+		end if
+		
+		if bolDebug then Log EventInformation,"Writing [UserPrinters] section"
+		oFile.WriteLine "[UserPrinters]" 
+		
+		'Now load up the queues for the server
+		set diTempDic = dicPrtSvrs.Item(sPrtSvr)
+		
+		'Write the queues out
+		if bolDebug then Log EventInformation,"Writing queues"
+		iCount = 1
+		For each sQueue in diTempDic.Keys
+			if bolDebug then Log EventInformation,"  " & sQueue
+			oFile.WriteLine "print" & iCount & "=" & sQueue
+			iCount = iCount + 1
+		Next
+		
+		oFile.close
+		
+		if bolDebug then Log EventInformation, "ExportLegacyFromCPrint function finished." & VbCrLf
+	End Function
+	
+	'Write a legacy ini from the global print servers mappings. Writes all queues from those servers to the file
+	Public Function ExportLegacyIni(pUPrint)
+		if bolDebug then Log EventInformation, "ExportLegacyIni function start."
+		Dim sPrtSvr, sDefault, sQueue
+		Dim arrSplitText
+		Dim oFile
+		Dim iCount
+		Dim oFSO: Set oFSO = CreateObject("Scripting.FileSystemObject")
+		
+		'Check to see if the uprinters file exists
+		If Not oFSO.FileExists(pUPrint) Then
+			if bolDebug then Log EventWarning,"Ini file not found: " & pUPrint & VbCrLf & "Creating..."
+			'Open the file
+			set oFile = oFSO.CreateTextFile(pUPrint)
+		Else
+			if bolDebug then Log EventWarning,"Ini file found: " & pUPrint & VbCrLf & "Writing new config"
+			'Open the file
+			set oFile = oFSO.OpenTextFile(pUPrint,ForWriting)		
+		End If
+		
+		'Now start writing the file	
+		if bolDebug then Log EventInformation,"Writing [General] section"
+		oFile.WriteLine "[General]"
+		
+		'Now see if the default printer is assigned to the print server being exported.
+		sDefault = GetDefault()	
+		
+		if not sDefault = false then
+			if left(sDefault,2) = "\\" then
+				arrSplitText = Split(sDefault,"\")
+				
+				'Is the current default in the legacy mappings? Write it if so. 
+				if dicLegacyMappings.Exists(arrSplitText(2)) then
+					oFile.WriteLine "DefaultPrinter=" & arrSplitText(3) & VbCrLf
+				end if
+			else 
+				if bolDebug then Log EventWarning,"Error in default printer: " & sDefault
+			end if
+		end if
+		
+		if bolDebug then Log EventInformation,"Writing [UserPrinters] section"
+		oFile.WriteLine "[UserPrinters]" 
+
+		
+		'Write the queues out
+		if bolDebug then Log EventInformation,"Writing queues"
+		iCount = 1
+		For each sQueue in GetLegacyServerQueues()
+			if bolDebug then Log EventInformation,"  " & sQueue
+			oFile.WriteLine "print" & iCount & "=" & sQueue
+			iCount = iCount + 1
+		Next
+		
+		oFile.close
+		
+		if bolDebug then Log EventInformation, "ExportLegacyIni function finished." & VbCrLf
+	End Function
+	
+	'Get the server out of the old cprint.ini
+	Private Function GetLegacyServer(pCPrint)
+		if bolDebug then Log EventInformation, "GetLegacyServer function start."
+		Dim oADSysInfo: Set oADSysInfo = CreateObject("ADSystemInfo")
+		Dim sSiteName: sSiteName = oADSysInfo.SiteName
+		Dim oFSO: Set oFSO = CreateObject("Scripting.FileSystemObject")
+
+		if bolDebug then Log EventInformation,"AD Site: " & sSiteName
+		
+		Dim arrSplitText
+		Dim sIniLine, sLocation, sServer
+		Dim oFile
+
+		'Check to see if the file exists...if not then quit
+		If Not oFSO.FileExists(pCPrint) Then
+			if bolDebug then Log EventWarning,"Ini file not found: " & pCPrint
+			GetLegacyServer = false
+			exit function
+		End If
+		
+		'Open the file
+		set oFile = oFSO.OpenTextFile(pCPrint,ForReading)
+		
+		'Start reading the file
+		Do While oFile.AtEndOfStream <> True
+			'Read the next line
+			sIniLine = ReadLine(oFile)
+			if sIniLine = false then exit do
+			
+			if UCase(sIniLine) = UCase("[ActiveDirectorySites]") Then 
+				if bolDebug then Log EventInformation,"Reading [ActiveDirectorySites] section from cPrint.ini"
+
+				'Now keep reading
+				Do While oFile.AtEndOfStream <> True
+					'Read the next line
+					sIniLine = ReadLine(oFile)
+					if sIniLine = false then exit do
+					
+					If Left(sIniLine,1)="[" Then
+						if bolDebug then Log EventInformation,"End of section"
+						Exit do 			'we have reached the end of the block
+					Else
+						'Split the string into the two parts. The parameter and the field/data
+						arrSplitText = Split(sIniLine,"=",2,1)
+						
+						'Found the site/location match. 
+						if bolDebug then Log EventInformation,"Site line: " & arrSplitText(1)
+						
+						If Ucase(arrSplitText(0)) = UCase(sSiteName) Then
+							if bolDebug then Log EventInformation,"Found site: " & arrSplitText(1)
+							sLocation = Ucase(arrSplitText(1))
+							Exit Do
+						End if
+					End If
+				Loop
+			End if
+			
+			
+			'Now read the printserver section
+			if UCase(sIniLine) = UCase("[PrintServer]") Then
+				if bolDebug then Log EventInformation,"Reading [PrintServer] section from cPrint.ini"
+				
+				'If this is correct block from the ini file, read the next section and assign to 
+				'the appropriate parameters.
+				Do While oFile.AtEndOfStream <> True
+					'Read the next line
+					sIniLine = oFile.ReadLine
+					
+					If Left(sIniLine,1)="[" Then
+							Exit do 			'we have reached the end of the block
+					Elseif Left(Trim(sIniLine),1)=";" Then
+						'This is a comment. skip
+					Elseif Trim(sIniLine)="" Then
+						'This is empty. skip
+					Else
+						'Split the string into the two parts. The parameter and the field/data
+						arrSplitText = Split(sIniLine,"=",2,1)
+						If Ucase(arrSplitText(0)) = UCase(sLocation) Then
+							'If the location matches, then return the value as the server and exit the loop
+							sServer = trim(Ucase(arrSplitText(1)))
+							Exit Do
+						End if
+					End If
+				Loop
+			End if
+			
+			if not IsEmpty(sServer) then
+				GetLegacyServer = uCase(Trim(sServer))
+				oFile.Close 
+				Exit Function
+			end if 
+		Loop
+		
+		
+		'If there still isn't a server, there isn't one in the file. 
+		'Close file, return 0. 
+		if IsEmpty(sServer) then
+			GetLegacyServer = false
+			Log EventWarning,"Server not found in legacy ini"
+			'close the text file 
+			oFile.Close 
+		end if 
+			
+	end Function
+
+	'Run maintenance on the database. This reads a file to check for queues or servers that need removing or replacing
+	'Returns an array of any queues removed during maintenance for later use with any cleanup tasks
+	Public Function RunMaintenance(pIni)
+		if bolDebug then Log EventInformation,"RunMaintenance function started"
+		
+		Dim oFile
+		Dim oFSO: Set oFSO = CreateObject("Scripting.FileSystemObject")
+		Dim sLine, sIniName, sIniLine, sQueue, sSvr, sMaintHeading, sOld, sNew
+		Dim iCount
+		Dim sDateFile
+		Dim arrSplitText
+		Dim aQueues() 'array to hold any queues removed
+		
+		sMaintHeading = "MAINTENANCE"
+		iCount = 0
+		
+		if oFSO.FileExists(pIni) then
+			'First get the file information for logging
+			set oFile = oFSO.GetFile(pIni)		
+			sIniName = oFSO.GetFileName(oFile)
+			
+			'Get the time stamp of the maintenance file
+			sDateFile = uCase(oFile.DateLastModified)
+			if bolDebug then Log EventInformation,"Maintenance file last modified: " & sDateFile
+			
+			'Only run maintenance if the maintenance file has changed since last run. 
+			if dicSettings.Exists(sMaintHeading) then
+				if dicSettings.Item(sMaintHeading) = sDateFile then
+					if bolDebug then Log EventInformation,"Maintenance file hasn't changed. Exiting"
+					'RunMaintenance = aQueues
+					exit function
+				end if
+				
+			end if
+			
+			'Now open the file
+			set oFile = oFSO.OpenTextFile(pIni,ForReading)
+			
+			'Read the first line
+			sIniLine = ReadLine(oFile)
+				
+			'Start reading the file
+			Do While oFile.AtEndOfStream <> True
+
+				
+				if sIniLine = False then
+					'End of file. 
+					Exit do
+				
+				'=====================
+				'[RemoveQueue] section
+				elseif UCase(sIniLine) = UCase("[RemoveQueue]") Then 
+					if bolDebug then Log EventInformation,"Reading [RemoveQueue] section from " & sIniName
+
+					'Now keep reading
+					Do While oFile.AtEndOfStream <> True
+						'Read the next line
+						sIniLine = ReadLine(oFile)
+						if sIniLine = false then exit do
+						
+						If Left(sIniLine,1)="[" Then
+							if bolDebug then Log EventInformation,"End of section"
+							Exit do 			'we have reached the end of the block
+						Else
+							sQueue = Trim(uCase(sIniLine))
+
+							'Run the removal function
+							if RemoveQueue(sQueue) then
+								'Expand and add the item to the removal array
+								ReDim Preserve aQueues(iCount)
+								aQueues(iCount)=sQueue
+								iCount = iCount + 1
+								
+								if bolDebug then Log EventInformation,sQueue
+							end if 
+						End If
+					Loop
+				
+				'=====================
+				'[ReplaceQueue] section
+				Elseif UCase(sIniLine) = UCase("[ReplaceQueue]") Then 
+					if bolDebug then Log EventInformation,"Reading [ReplaceQueue] section from " & sIniName
+
+					'Now keep reading
+					Do While oFile.AtEndOfStream <> True
+						'Read the next line
+						sIniLine = ReadLine(oFile)
+						if sIniLine = false then exit do
+						
+						If Left(sIniLine,1)="[" Then
+							if bolDebug then Log EventInformation,"End of section"
+							Exit do 			'we have reached the end of the block
+						Else
+							arrSplitText = Split(sIniLine,",")
+							sOld = arrSplitText(0)
+							sNew = arrSplitText(1)
+
+							'Run the function
+							if ReplaceQueue(sOld,sNew) = true then
+								' if the queue was removed, expand and add the item to the removal array
+								ReDim Preserve aQueues(iCount)
+								aQueues(iCount)=sOld
+								iCount = iCount + 1
+							end if 
+						End If
+					Loop
+				
+				'=====================
+				'[RemoveServer] section
+				Elseif UCase(sIniLine) = UCase("[RemoveServer]") Then 
+					if bolDebug then Log EventInformation,"Reading [RemoveServer] section from " & sIniName
+
+					'Now keep reading
+					Do While oFile.AtEndOfStream <> True
+						'Read the next line
+						sIniLine = ReadLine(oFile)
+						if sIniLine = false then exit do
+						
+						If Left(sIniLine,1)="[" Then
+							if bolDebug then Log EventInformation,"End of section"
+							Exit do 			'we have reached the end of the block
+						Else
+							sSvr = Trim(uCase(sIniLine))
+							
+							'Run the function
+							if RemoveServer(sSvr) then 
+								'Add the queues to be removed to the array
+								for each sQueue in GetServerQueues(sSvr)
+									'Expand and add the item to the removal array
+									ReDim Preserve aQueues(iCount)
+									aQueues(iCount)=Trim(uCase(sQueue))
+									iCount = iCount + 1
+								next 
+							end if 
+						End If
+					Loop
+				
+				'=====================
+				'[ReplaceServer] section
+				Elseif UCase(sIniLine) = UCase("[ReplaceServer]") Then 
+					if bolDebug then Log EventInformation,"Reading [ReplaceServer] section from " & sIniName
+
+					'Now keep reading
+					Do While oFile.AtEndOfStream <> True
+						'Read the next line
+						sIniLine = ReadLine(oFile)
+						if sIniLine = false then exit do
+						
+						If Left(sIniLine,1)="[" Then
+							if bolDebug then Log EventInformation,"End of section"
+							Exit do 			'we have reached the end of the block
+						Else
+							arrSplitText = Split(sIniLine,",")
+							sOld = arrSplitText(0)
+							sNew = arrSplitText(1)
+	
+							'Run the function
+							if ReplaceServer(sOld,sNew) then
+								'Add the queues to be removed to the array
+								for each sQueue in GetServerQueues(sOld)
+									'Expand and add the item to the removal array
+									ReDim Preserve aQueues(iCount)
+									aQueues(iCount)=Trim(uCase(sQueue))
+									iCount = iCount + 1
+								next 
+							end if 
+						End If
+					Loop
+				
+				'[AddQueue] section
+				Elseif UCase(sIniLine) = UCase("[AddQueue]") Then 
+					if bolDebug then Log EventInformation,"Reading [AddQueue] section from " & sIniName
+
+					'Now keep reading
+					Do While oFile.AtEndOfStream <> True
+						'Read the next line
+						sIniLine = ReadLine(oFile)
+						if sIniLine = false then exit do
+						
+						If Left(sIniLine,1)="[" Then
+							if bolDebug then Log EventInformation,"End of section"
+							Exit do 			'we have reached the end of the block
+						Else
+							'Run the function
+							AddQueue Trim(uCase(sIniLine))
+						End If
+					Loop
+				End if
+			Loop
+			
+			'Gracefully close the ini file. 
+			if bolDebug then Log EventInformation,"End of file"
+			oFile.close
+			
+			RunMaintenance = aQueues
+			
+			'Record the date stamp of the maintenance file so it won't run until changed
+			if dicSettings.Exists(sMaintHeading) then
+				dicSettings.Item(sMaintHeading) = sDateFile
+			else
+				dicSettings.Add sMaintHeading,sDateFile
+			end if
+		
+		else
+			Log EventError,"Maintenance file not found: " & pIni		
+		end if
+
+		if bolDebug then Log EventInformation,"RunMaintenance function finished" & VbCrLf
+		
+	End Function
+	
+	'Read a line from a text file. Parse the file object, not the path. 
+	'Removes blank lines, comments etc
+	Private Function ReadLine(pFile)
+		Dim sLine
+		
+		Do While pFile.AtEndOfStream <> True
+			'Read the next line
+			sLine = pFile.ReadLine	
+
+			'If a comment or blank line, run function recursively until the next line is reached. 
+			if Left(Trim(sLine),1)=";" Then
+				'Skip, comment
+			Elseif Trim(sLine)="" Then
+				'Skip, blank line
+			Else
+				'here is the next usable line. pass it back
+				ReadLine = sLine
+				Exit Function
+			End If
+
+			
+		Loop
+		
+		'No usable line found. Return false
+		ReadLine = false
+	End Function
+
+End Class
+'=====================================================
+
+</SCRIPT>
+
+</head>
+
+<body onload="LoadHTA" onbeforeunload="UnloadHTA" STYLE="font:14 pt Verdana; color:black;" >
+	<div id="progress" class="progress_block"></div>
+	
+	<table border=0 width=100% style="padding=0px">
+		<tr>
+			<td>
+				<div id = "Title" style="text-align:left; font-size:24px; font-weight:bold; vertical-align:text-top;padding=0px;"></div>
+
+			</td>
+			<td id="progress" style="text-align:right; vertical-align:text-top">
+			
+			</td>
+
+		</tr>
+	</table>
+	<hr color=blue />
+
+	<table border=0 width=100% style="padding=0px">
+		<tr>
+			<td title="Enter the printer name, (or part of it) in the search field above, then click Go." style="vertical-align:text-top;">
+				Printer Search <br>
+				<input type="text" size="20" name="txtSearch" id="txtSearch" onkeypress="handleKeyPress" tabindex="0" title="Enter the printer name, (or part of it) in the search field above, then click Go.">
+				<input type="button" value="Go" name="cmdSearch" id="cmdSearch" onClick="searchPrinters" title="Enter the printer name, (or part of it) in the search field above, then click Go.">				
+				<br>
+
+			</td>
+			<td id="searchOptions" style="vertical-align:bottom;padding-bottom:0px;padding-left=20px;font-size:10px">
+
+			</td>
+		</tr>
+		
+		<tr>
+			<td style="width:220px;">
+				<select id="listPrinters" style="width:250px;font-family:'Verdana'" multiple="no" size="10" name="listPrinters" onchange="vPrinterDetails" onkeypress="handleKeyPress" onclick="vPrinterDetails" ondblclick="MapPrinter">
+				</select>
+			</td>
+			<td id="details" class="OutputWindow">
+			
+			</td>
+		</tr>
+		
+		<tr>
+			<td>
+				<input type="button" value="Connect" name="cmdConnect" id="cmdConnect" onClick="MapPrinter">
+			</td>
+			
+			<td>
+			
+			</td>
+		</tr>
+		
+	</table>
+
+	<hr color=blue />
+
+	<table border=0 width=100% style="padding=0px">	
+		<tr>
+			<td colspan=2>
+				<b>Your Printers:</b>
+			</td>
+			
+		</tr>
+	</table>
+
+	<table border=0 width=100%">
+		<tr>
+			<td style="width:220px;">
+				<select style="width:250px;" type="text" size="5" name="selYourPrinters" id="selYourPrinters" onkeypress="handleKeyPress"  ondblclick="PrintQueue"></select>
+			</td>
+			
+			<td rowspan=2 class=outputWindow >
+				<div class=ouputScrollable id="textOutput"> 
+				</div>
+			</td>			
+		</tr>
+
+		<tr>
+			<td>
+				<input type="button" style="width:100;" value="Properties" name="cmdProperties" id="cmdProperties" onclick="PrinterProperties" />
+				<input type="button" style="width:100;" value="Print Queue" name="cmdQueue" id="cmdQueue" onclick="PrintQueue" /><br>
+				<input type="button" style="width:100;" value="Set Default" name="cmdSetDefault" id="cmdSetDefault" onclick="setDefaultPrinter" />
+				<input type="button" style="width:100;" value="Remove" name="cmdRemove" id="cmdRemove" onclick="UnMapPrinter" />
+			</td>
+		</tr>
+	</table>
+
+	<table>
+		<tr>
+			<td colspan=2 id="lblDefaultPrinter" name="lblDefaultPrinter">
+
+			</td>
+		</tr>
+	</table>
+
+	<hr color=blue />
+	
+	<table width=100%>
+		<tr>
+			<td>
+				<div id="advanced"></div>
+			</td>
+
+			<td style="text-align:right; font-size:10px;vertical-align:bottom">
+				<div id="versionNumber"></div>
+			</td>
+		</tr>
+	</table>
+</body>
+</html>
+

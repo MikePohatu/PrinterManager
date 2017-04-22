@@ -38,6 +38,7 @@
     <Reference Include="PresentationFramework" />
     <Reference Include="System" />
     <Reference Include="System.Core" />
+    <Reference Include="System.Management" />
     <Reference Include="System.Windows" />
     <Reference Include="System.Xaml" />
     <Reference Include="System.Xml.Linq" />
@@ -52,6 +53,7 @@
     <Compile Include="Config\ConfigFile.cs" />
     <Compile Include="Config\XmlHandler.cs" />
     <Compile Include="Connectors\ActiveDirectoryConnector.cs" />
+    <Compile Include="Connectors\LocalPrintingConnector.cs" />
     <Compile Include="Connectors\PrintServerConnector.cs" />
     <Compile Include="Logging\ILoggingReceiver.cs" />
     <Compile Include="Logging\LoggerFacade.cs" />
