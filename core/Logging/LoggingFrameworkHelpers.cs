@@ -25,7 +25,7 @@ namespace core.Logging
     {
         public static void InitializeLogFramework()
         {
-            ConfigurationItemFactory.Default.Targets.RegisterDefinition("LiveDataWindow", typeof(LoggingReceiverNLog));
+            ConfigurationItemFactory.Default.Targets.RegisterDefinition("OutputWindow", typeof(LoggingReceiverNLog));
         }
 
         public static IEnumerable<ILoggingReceiver> GetLoggingReceivers()

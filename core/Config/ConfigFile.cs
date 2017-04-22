@@ -4,9 +4,9 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace core.Connectors
+namespace core.Config
 {
-    internal class PrintServerConnector
+    internal class ConfigFile
     {
     }
 }

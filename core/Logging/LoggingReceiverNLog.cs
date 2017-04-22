@@ -19,11 +19,10 @@ using System;
 
 using NLog;
 using NLog.Targets;
-using NLog.Config;
 
 namespace core.Logging
 {
-    [Target("LiveDataWindow")]
+    [Target("OutputWindow")]
     public class LoggingReceiverNLog: TargetWithLayout, ILoggingReceiver
     {
         public event NewLog NewLogMessage;
