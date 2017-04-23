@@ -6,7 +6,7 @@ using System.Threading.Tasks;
 
 namespace core.Config
 {
-    internal class ConfigFile
+    internal class IniConfigFile
     {
     }
 }

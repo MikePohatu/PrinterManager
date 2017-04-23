@@ -50,10 +50,10 @@
     <Reference Include="WindowsBase" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="Config\ConfigFile.cs" />
+    <Compile Include="Config\IniConfigFile.cs" />
     <Compile Include="Config\XmlHandler.cs" />
     <Compile Include="Connectors\ActiveDirectoryConnector.cs" />
-    <Compile Include="Connectors\LocalPrintingConnector.cs" />
+    <Compile Include="Connectors\LocalPrintingWmiConnector.cs" />
     <Compile Include="Connectors\PrintServerConnector.cs" />
     <Compile Include="Logging\ILoggingReceiver.cs" />
     <Compile Include="Logging\LoggerFacade.cs" />
