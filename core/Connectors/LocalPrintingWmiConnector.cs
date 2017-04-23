@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Management;
 using core.Logging;
-
+using System.Collections.Generic;
 
 namespace core.Connectors
 {
@@ -97,6 +97,22 @@ namespace core.Connectors
                 new ManagementObjectSearcher("SELECT * FROM Win32_Printer WHERE ShareName=" + queue);
 
             return searcher.Get();
+        }
+
+        public PrinterLibrary GetConnectedPrinters()
+        {
+            PrinterLibrary lib = new PrinterLibrary();
+
+            ManagementObjectSearcher searcher = new ManagementObjectSearcher("SELECT * FROM Win32_Printer");
+
+            foreach (ManagementObject printer in searcher.Get())
+            {
+                string svr = printer["ServerName"] as string;
+                string name = printer["Name"] as string;
+                lib.AddPrintQueue(svr,name);
+            }
+
+            return lib;
         }
 
         /// <summary>

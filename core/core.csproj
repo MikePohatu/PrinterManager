@@ -60,6 +60,7 @@
     <Compile Include="Logging\LoggingDelegates.cs" />
     <Compile Include="Logging\LoggingFrameworkHelpers.cs" />
     <Compile Include="Logging\LoggingReceiverNLog.cs" />
+    <Compile Include="PrinterLibrary.cs" />
     <Compile Include="PrintQueue.cs" />
     <Compile Include="PrintServer.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using core.Logging;
 
 namespace core
 {
@@ -16,9 +17,11 @@ namespace core
             this.Queues = new List<PrintQueue>();
         }
 
-        public void AddQueue(PrintQueue queue)
+        public void AddQueue(string queue)
         {
-            if (queue != null) { this.Queues.Add(queue); }
+            if (string.IsNullOrWhiteSpace(queue)) { LoggerFacade.Error("Empty queue passed to AddQueue"); }
+            PrintQueue newqueue = new PrintQueue(queue.ToUpper(), this);
+            if (newqueue != null) { this.Queues.Add(newqueue); }
         }
 
         public void RemoveQueue(PrintQueue queue)
